@@ -1,0 +1,17 @@
+[package]
+name = "notrieve"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+license = "MIT"
+description = "Local hybrid search over Markdown notes for AI agents via MCP"
+repository = "https://github.com/muleyuck/notrieve"
+publish = false
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+toml = "1.1"
+
+[dev-dependencies]
+tempfile = "3"
