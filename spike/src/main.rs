@@ -1,15 +1,17 @@
+mod bench;
 mod embed_check;
 
 use std::process::ExitCode;
 
 pub type CheckResult = anyhow::Result<bool>;
 
-const USAGE: &str = "usage: notrieve-spike <embed-check> ...";
+const USAGE: &str = "usage: notrieve-spike <embed-check|bench> ...";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.first().map(String::as_str) {
         Some("embed-check") => embed_check::run(&args[1..]),
+        Some("bench") => bench::run(&args[1..]),
         _ => {
             eprintln!("{USAGE}");
             return ExitCode::from(2);
