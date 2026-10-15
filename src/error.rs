@@ -20,6 +20,8 @@ pub enum Error {
     Config(String),
     #[error("another notrieve process is updating the index")]
     LockBusy,
+    #[error("a chunk needs {tokens} tokens but the limit is {max}")]
+    ChunkTooLarge { tokens: usize, max: usize },
     #[error("{path}: {source}")]
     Io {
         path: PathBuf,

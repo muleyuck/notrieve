@@ -1,3 +1,4 @@
+pub mod chunk;
 mod frontmatter;
 mod tags;
 
