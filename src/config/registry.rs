@@ -1,10 +1,11 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 
-use crate::{Error, Result};
+use crate::{Error, Result, lock};
 
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Registry {
@@ -25,12 +26,28 @@ impl Registry {
         }
     }
 
+    /// Serialises load, `f` and save across processes; a failing `f` leaves the file untouched.
+    pub fn update<T>(path: &Path, f: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
+        let mut lock_path = path.as_os_str().to_os_string();
+        lock_path.push(".lock");
+        let _lock = lock::lock_blocking(Path::new(&lock_path))?;
+        let mut registry = Self::load(path)?;
+        let out = f(&mut registry)?;
+        registry.save(path)?;
+        Ok(out)
+    }
+
     pub fn save(&self, path: &Path) -> Result<()> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|e| Error::io(parent, e))?;
         }
         let text = toml::to_string(self).map_err(|e| Error::Config(e.to_string()))?;
-        let tmp = path.with_extension("toml.tmp");
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let tmp = path.with_extension(format!(
+            "toml.{}.{}.tmp",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
         fs::write(&tmp, text).map_err(|e| Error::io(&tmp, e))?;
         fs::rename(&tmp, path).map_err(|e| Error::io(path, e))
     }
@@ -162,6 +179,46 @@ mod tests {
             }
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    #[test]
+    fn concurrent_updates_all_survive() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("vaults.toml");
+        let handles: Vec<_> = (0..4)
+            .map(|t| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    for i in 0..25 {
+                        Registry::update(&path, |r| {
+                            r.add(&format!("v{t}-{i}"), Path::new("/a"), false)
+                        })
+                        .unwrap();
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+        assert_eq!(Registry::load(&path).unwrap().vaults.len(), 100);
+    }
+
+    #[test]
+    fn single_update_persists_and_a_failing_one_changes_nothing() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("vaults.toml");
+        Registry::update(&path, |r| r.add("a", Path::new("/a"), false)).unwrap();
+        let err = Registry::update(&path, |r| r.add("a", Path::new("/b"), false)).unwrap_err();
+        assert!(matches!(err, Error::DuplicateVaultName(_)));
+        let r = Registry::load(&path).unwrap();
+        assert_eq!(r.get("a").unwrap(), Path::new("/a"));
+        let leftovers: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty());
     }
 
     #[test]

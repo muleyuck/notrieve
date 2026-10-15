@@ -22,6 +22,14 @@ pub enum Error {
     LockBusy,
     #[error("a chunk needs {tokens} tokens but the limit is {max}")]
     ChunkTooLarge { tokens: usize, max: usize },
+    #[error("model error: {0}; run `notrieve model pull --force` if the files are damaged")]
+    Model(String),
+    #[error("model file {file} is missing in {dir}")]
+    ModelFileMissing { dir: PathBuf, file: String },
+    #[error("download of {url} failed: {message}")]
+    Download { url: String, message: String },
+    #[error("embedding failed: {0}")]
+    Embedding(String),
     #[error("{path}: {source}")]
     Io {
         path: PathBuf,
