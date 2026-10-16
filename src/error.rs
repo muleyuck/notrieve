@@ -42,6 +42,8 @@ pub enum Error {
     SchemaTooNew { found: i64, supported: i64 },
     #[error("the index settings changed while this process was running; restart it")]
     FingerprintChanged,
+    #[error("{0} is not valid UTF-8")]
+    NotUtf8(String),
     #[error("{path}: {source}")]
     Io {
         path: PathBuf,
