@@ -30,6 +30,18 @@ pub enum Error {
     Download { url: String, message: String },
     #[error("embedding failed: {0}")]
     Embedding(String),
+    #[error("database error: {0}")]
+    Sqlite(#[from] rusqlite::Error),
+    #[error(
+        "{0} is not a readable SQLite database; run `notrieve index --rebuild` to move it aside and rebuild"
+    )]
+    DbCorrupt(PathBuf),
+    #[error(
+        "the index was written by a newer notrieve (schema {found}, supported {supported}); update notrieve or run `notrieve index --rebuild`"
+    )]
+    SchemaTooNew { found: i64, supported: i64 },
+    #[error("the index settings changed while this process was running; restart it")]
+    FingerprintChanged,
     #[error("{path}: {source}")]
     Io {
         path: PathBuf,
