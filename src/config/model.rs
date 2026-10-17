@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{Error, Result};
 
-pub const PRESET_RURI_V3_130M: &str = "ruri-v3-130m";
+pub const PRESET_RURI_V3_30M: &str = "ruri-v3-30m";
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(untagged)]
@@ -56,23 +56,23 @@ pub struct ModelContract {
 impl ModelSpec {
     pub fn resolve(&self, vault_root: &Path) -> Result<ModelContract> {
         match self {
-            ModelSpec::Preset(name) if name == PRESET_RURI_V3_130M => Ok(ruri_v3_130m()),
+            ModelSpec::Preset(name) if name == PRESET_RURI_V3_30M => Ok(ruri_v3_30m()),
             ModelSpec::Preset(name) => Err(Error::Config(format!(
-                "unknown model preset `{name}` (available: {PRESET_RURI_V3_130M}); use a [model] table for other models"
+                "unknown model preset `{name}` (available: {PRESET_RURI_V3_30M}); use a [model] table for other models"
             ))),
             ModelSpec::Table(table) => table.resolve(vault_root),
         }
     }
 }
 
-fn ruri_v3_130m() -> ModelContract {
+fn ruri_v3_30m() -> ModelContract {
     ModelContract {
-        id: PRESET_RURI_V3_130M.to_string(),
+        id: PRESET_RURI_V3_30M.to_string(),
         source: ModelSource::Hf {
-            repo: "sirasagi62/ruri-v3-130m-ONNX".to_string(),
+            repo: "sirasagi62/ruri-v3-30m-ONNX".to_string(),
         },
         onnx_file: "onnx/model.onnx".to_string(),
-        dim: 512,
+        dim: 256,
         max_tokens: 512,
         pooling: Pooling::Mean,
         query_prefix: "検索クエリ: ".to_string(),
@@ -192,16 +192,16 @@ mod tests {
 
     #[test]
     fn preset_resolves_to_fp32_ruri_contract() {
-        let c = resolve("model = \"ruri-v3-130m\"").unwrap();
-        assert_eq!(c.id, "ruri-v3-130m");
+        let c = resolve("model = \"ruri-v3-30m\"").unwrap();
+        assert_eq!(c.id, "ruri-v3-30m");
         assert_eq!(
             c.source,
             ModelSource::Hf {
-                repo: "sirasagi62/ruri-v3-130m-ONNX".into()
+                repo: "sirasagi62/ruri-v3-30m-ONNX".into()
             }
         );
         assert_eq!(c.onnx_file, "onnx/model.onnx");
-        assert_eq!((c.dim, c.max_tokens, c.pooling), (512, 512, Pooling::Mean));
+        assert_eq!((c.dim, c.max_tokens, c.pooling), (256, 512, Pooling::Mean));
         assert_eq!(
             (c.query_prefix.as_str(), c.document_prefix.as_str()),
             ("検索クエリ: ", "検索文書: ")
@@ -242,9 +242,9 @@ mod tests {
 
     #[test]
     fn unknown_preset_names_the_available_one() {
-        let err = resolve("model = \"ruri-v3-30m\"").unwrap_err();
+        let err = resolve("model = \"ruri-v3-130m\"").unwrap_err();
         assert!(
-            matches!(&err, Error::Config(m) if m.contains("ruri-v3-130m")),
+            matches!(&err, Error::Config(m) if m.contains("available: ruri-v3-30m")),
             "{err}"
         );
     }

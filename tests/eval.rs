@@ -12,9 +12,9 @@ use notrieve::search::SearchQuery;
 use serde::Deserialize;
 use tempfile::TempDir;
 
-/// Measurement with ruri-v3-130m fp32 on macOS arm64 (2026-10-17, 35 queries over 25 notes):
-/// Recall@5 1.000 (Recall@1 0.943, MRR@5 0.967). One 0.05 step lower for numeric differences on
-/// other platforms (spec §10.5).
+/// The default model is ruri-v3-30m fp32. Measurement on macOS arm64 (2026-10-24, 35 queries over
+/// 25 notes): Recall@5 1.000 (Recall@1 0.714, MRR@5 0.838). One 0.05 step lower for numeric
+/// differences on other platforms (spec §10.5).
 const RECALL_AT_5_THRESHOLD: f64 = 0.95;
 
 #[derive(Deserialize)]

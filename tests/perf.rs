@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use notrieve::Result;
 use notrieve::cache::{EmbeddingCache, cache_path};
-use notrieve::config::{ModelSpec, PRESET_RURI_V3_130M, model_cache_dir};
+use notrieve::config::{ModelSpec, PRESET_RURI_V3_30M, model_cache_dir};
 use notrieve::embed::download::ensure_model;
 use notrieve::embed::fake::FakeEmbedder;
 use notrieve::embed::onnx::resolve_threads;
@@ -150,7 +150,7 @@ fn ten_thousand_files_rebuild_from_the_cache_in_30_seconds_and_search_within_the
     }
     assert!((45_000_000..=55_000_000).contains(&total), "{total} bytes");
 
-    let contract = ModelSpec::Preset(PRESET_RURI_V3_130M.into())
+    let contract = ModelSpec::Preset(PRESET_RURI_V3_30M.into())
         .resolve(&root)
         .unwrap();
     let dir = ensure_model(&contract, &model_cache_dir().unwrap(), false, &mut |_| {}).unwrap();

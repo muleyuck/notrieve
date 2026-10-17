@@ -2,7 +2,7 @@ mod model;
 mod registry;
 mod vault;
 
-pub use model::{ModelContract, ModelSource, ModelSpec, ModelTable, PRESET_RURI_V3_130M, Pooling};
+pub use model::{ModelContract, ModelSource, ModelSpec, ModelTable, PRESET_RURI_V3_30M, Pooling};
 pub use registry::Registry;
 pub use vault::{Vault, find_vault_root, init_vault, resolve_vault};
 
@@ -17,7 +17,7 @@ pub const CONFIG_DIR: &str = ".notrieve";
 pub const CONFIG_FILE: &str = "config.toml";
 pub const DEFAULT_CONFIG_TOML: &str = "\
 # notrieve vault settings
-model = \"ruri-v3-130m\"
+model = \"ruri-v3-30m\"
 exclude = []
 ";
 pub const VAULT_GITIGNORE: &str = "index.db*\n*.embeddings.db*\n*.lock\n";
@@ -40,7 +40,7 @@ pub struct VaultConfig {
 }
 
 fn default_model() -> ModelSpec {
-    ModelSpec::Preset(PRESET_RURI_V3_130M.to_string())
+    ModelSpec::Preset(PRESET_RURI_V3_30M.to_string())
 }
 
 fn default_db_path() -> PathBuf {
@@ -114,7 +114,7 @@ mod tests {
 
     #[test]
     fn omitted_settings_take_documented_defaults() {
-        let c = VaultConfig::parse("model = \"ruri-v3-130m\"\n").unwrap();
+        let c = VaultConfig::parse("model = \"ruri-v3-30m\"\n").unwrap();
         assert!(c.exclude.is_empty());
         assert_eq!(c.db_path, PathBuf::from(".notrieve/index.db"));
         assert_eq!(

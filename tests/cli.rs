@@ -38,7 +38,7 @@ impl Env {
         fs::create_dir_all(root.join(".notrieve")).unwrap();
         fs::write(
             root.join(".notrieve/config.toml"),
-            "model = \"ruri-v3-130m\"\n",
+            "model = \"ruri-v3-30m\"\n",
         )
         .unwrap();
         root
