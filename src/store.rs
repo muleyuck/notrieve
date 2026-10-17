@@ -11,7 +11,7 @@ use crate::cache::EmbeddingKey;
 use crate::fingerprint::Fingerprints;
 use crate::{Error, Result};
 
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 
 const SCHEMA_SQL: &str = include_str!("schema.sql");
 
@@ -43,6 +43,14 @@ pub struct FileState {
     pub size: i64,
     pub content_hash: String,
     pub title: String,
+}
+
+/// A file `index_vault` could not index, with the mtime and size it was seen at.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkippedState {
+    pub mtime_ns: i64,
+    pub size: i64,
+    pub reason: String,
 }
 
 /// Why `index_vault` rebuilds the index; shown to the user (spec §4.1).
@@ -302,6 +310,7 @@ impl Store {
             "UPDATE files SET mtime_ns = ?2, size = ?3 WHERE path = ?1",
             params![path, mtime_ns, size],
         )?;
+        tx.execute("DELETE FROM skipped_files WHERE path = ?1", [path])?;
         tx.commit()?;
         Ok(())
     }
@@ -320,6 +329,7 @@ impl Store {
             "UPDATE files SET path = ?2, mtime_ns = ?3, size = ?4 WHERE path = ?1",
             params![from, to, mtime_ns, size],
         )?;
+        tx.execute("DELETE FROM skipped_files WHERE path = ?1", [to])?;
         tx.commit()?;
         Ok(())
     }
@@ -330,6 +340,67 @@ impl Store {
         delete_rows(&tx, path)?;
         tx.commit()?;
         Ok(())
+    }
+
+    /// Records a file that could not be indexed, so it is not retried until its mtime or size changes.
+    pub fn skip_file(
+        &mut self,
+        fingerprint: &str,
+        path: &str,
+        mtime_ns: i64,
+        size: i64,
+        reason: &str,
+    ) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        check_fingerprint(&tx, fingerprint)?;
+        // The old content must not stay searchable once the file cannot be indexed.
+        delete_rows(&tx, path)?;
+        tx.execute(
+            "INSERT OR REPLACE INTO skipped_files(path, mtime_ns, size, reason)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![path, mtime_ns, size, reason],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Removes the skipped rows of paths that are no longer in the vault.
+    pub fn retain_skipped(&mut self, fingerprint: &str, present: &HashSet<&str>) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        check_fingerprint(&tx, fingerprint)?;
+        let stale: Vec<String> = {
+            let mut stmt = tx.prepare("SELECT path FROM skipped_files")?;
+            stmt.query_map([], |r| r.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+                .into_iter()
+                .filter(|p| !present.contains(p.as_str()))
+                .collect()
+        };
+        for path in stale {
+            tx.execute("DELETE FROM skipped_files WHERE path = ?1", [path])?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn skipped_states(&self) -> Result<HashMap<String, SkippedState>> {
+        if !self.has_table("skipped_files")? {
+            return Ok(HashMap::new());
+        }
+        let mut stmt = self
+            .conn
+            .prepare("SELECT path, mtime_ns, size, reason FROM skipped_files")?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                SkippedState {
+                    mtime_ns: r.get(1)?,
+                    size: r.get(2)?,
+                    reason: r.get(3)?,
+                },
+            ))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     pub fn file_states(&self) -> Result<HashMap<String, FileState>> {
@@ -432,6 +503,7 @@ fn delete_rows(tx: &Transaction, path: &str) -> Result<()> {
         tx.execute("DELETE FROM chunks_fts WHERE rowid = ?1", [id])?;
     }
     tx.execute("DELETE FROM files WHERE path = ?1", [path])?;
+    tx.execute("DELETE FROM skipped_files WHERE path = ?1", [path])?;
     Ok(())
 }
 

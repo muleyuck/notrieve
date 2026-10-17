@@ -6,9 +6,12 @@ DROP TABLE IF EXISTS chunks_fts;
 DROP TABLE IF EXISTS file_tags;
 DROP TABLE IF EXISTS chunks;
 DROP TABLE IF EXISTS files;
+DROP TABLE IF EXISTS skipped_files;
 DROP TABLE IF EXISTS meta;
 
 CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+-- Files that could not be indexed; unchanged ones (same mtime and size) are not retried.
+CREATE TABLE skipped_files(path TEXT PRIMARY KEY, mtime_ns INTEGER NOT NULL, size INTEGER NOT NULL, reason TEXT NOT NULL);
 CREATE TABLE files(
   id INTEGER PRIMARY KEY,
   path TEXT NOT NULL UNIQUE,

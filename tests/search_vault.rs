@@ -151,3 +151,21 @@ fn scan_error_takes_precedence_over_a_lock_held_elsewhere() {
     fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
     assert_eq!(r.unwrap().index_state, IndexState::ScanError);
 }
+
+#[test]
+fn unindexable_file_does_not_keep_the_index_stale() {
+    let (_tmp, vault) = vault_with("");
+    write(&vault, "a.md", "alpha beta\n");
+    fs::write(vault.root.join("bad.md"), [0xff, 0xfe, 0x00]).unwrap();
+    let e = FakeEmbedder::new(16);
+    for _ in 0..2 {
+        let r = search_vault(&vault, &e, &fps(), &SearchQuery::new("alpha"), &mut |_| {}).unwrap();
+        assert_eq!((r.stale_files, r.index_state), (0, IndexState::Fresh));
+    }
+    write(&vault, "bad.md", "recovered gamma text\n");
+    let r = search_vault(&vault, &e, &fps(), &SearchQuery::new("gamma"), &mut |_| {}).unwrap();
+    assert_eq!((r.stale_files, r.index_state), (0, IndexState::Fresh));
+    assert!(r.results.iter().any(|x| x.path == "bad.md"));
+    let store = notrieve::search::open_reader(&vault.db_path()).unwrap();
+    assert!(store.skipped_states().unwrap().is_empty());
+}

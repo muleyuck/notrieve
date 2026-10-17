@@ -184,7 +184,8 @@ pub fn search_vault<E: Embedder + ?Sized>(
     }
     let reader = search::open_reader(&db)?;
     let scan = scan_vault(&vault.root, &vault.config.exclude)?;
-    let stale_files = plan_changes(&scan, &reader.file_states()?).stale_files();
+    let stale_files =
+        plan_changes(&scan, &reader.file_states()?, &reader.skipped_states()?).stale_files();
     // Our own lock was released above, so a held lock belongs to another process (spec §4.5).
     let index_state = if !scan.complete {
         IndexState::ScanError

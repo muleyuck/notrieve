@@ -1,5 +1,6 @@
 pub mod scan;
 
+use std::collections::HashSet;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -94,7 +95,8 @@ pub fn index_vault<E: Embedder + ?Sized>(
         );
     }
     let states = store.file_states()?;
-    let plan = plan_changes(&scan, &states);
+    let skipped = store.skipped_states()?;
+    let plan = plan_changes(&scan, &states, &skipped);
 
     let mut deleted = plan.deleted;
     let total = plan.candidates.len();
@@ -117,10 +119,13 @@ pub fn index_vault<E: Embedder + ?Sized>(
         let bytes = match std::fs::read(&entry.abs) {
             Ok(bytes) => bytes,
             Err(e) => {
-                report.skipped.push(SkippedFile {
-                    path: entry.rel.clone(),
-                    reason: e.to_string(),
-                });
+                store.skip_file(
+                    &fps.index,
+                    &entry.rel,
+                    entry.mtime_ns,
+                    entry.size,
+                    &e.to_string(),
+                )?;
                 continue;
             }
         };
@@ -160,10 +165,13 @@ pub fn index_vault<E: Embedder + ?Sized>(
             Ok(()) => report.indexed += 1,
             Err(e @ (Error::NotUtf8(_) | Error::Embedding(_) | Error::ChunkTooLarge { .. })) => {
                 tracing::warn!(path = %entry.rel, "skipped: {e}");
-                report.skipped.push(SkippedFile {
-                    path: entry.rel.clone(),
-                    reason: e.to_string(),
-                });
+                store.skip_file(
+                    &fps.index,
+                    &entry.rel,
+                    entry.mtime_ns,
+                    entry.size,
+                    &e.to_string(),
+                )?;
             }
             Err(e) => return Err(e),
         }
@@ -183,6 +191,20 @@ pub fn index_vault<E: Embedder + ?Sized>(
             }
         }
     }
+    let present: HashSet<&str> = scan.entries.iter().map(|e| e.rel.as_str()).collect();
+    if finished && report.remaining == 0 && scan.complete {
+        store.retain_skipped(&fps.index, &present)?;
+    }
+    let mut recorded: Vec<SkippedFile> = store
+        .skipped_states()?
+        .into_iter()
+        .map(|(path, s)| SkippedFile {
+            path,
+            reason: s.reason,
+        })
+        .collect();
+    recorded.sort_by(|a, b| a.path.cmp(&b.path));
+    report.skipped = recorded;
     // Only after a complete run: a run stopped by the budget (or an incomplete scan) still needs
     // the vectors of files it has not re-indexed yet.
     if finished && report.remaining == 0 && scan.complete {

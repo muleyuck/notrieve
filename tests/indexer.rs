@@ -408,7 +408,12 @@ fn stale_files_counts_changes_without_hashing() {
     fs::remove_file(f.path("b.md")).unwrap();
     let scan = scan_vault(Path::new(f.vault.path()), &[]).unwrap();
     assert_eq!(
-        plan_changes(&scan, &s.file_states().unwrap()).stale_files(),
+        plan_changes(
+            &scan,
+            &s.file_states().unwrap(),
+            &s.skipped_states().unwrap()
+        )
+        .stale_files(),
         2
     );
 }
@@ -962,4 +967,165 @@ fn dimension_change_stores_vectors_of_the_new_dimension() {
         .map(Result::unwrap)
         .collect();
     assert_eq!(lengths, [64]);
+}
+
+fn skipped_paths(r: &IndexReport) -> Vec<(&str, &str)> {
+    r.skipped
+        .iter()
+        .map(|s| (s.path.as_str(), s.reason.as_str()))
+        .collect()
+}
+
+#[test]
+fn unchanged_skipped_file_is_not_retried_but_stays_in_the_report() {
+    let f = Fixture::new();
+    f.write("ok.md", "fine\n");
+    f.write("bad.md", "contains BOOM\n");
+    fs::write(f.path("latin1.md"), [0xff, 0xfe, 0x00]).unwrap();
+    let (mut s, e) = (f.store(), FakeEmbedder::new(8).failing_on("BOOM"));
+    let first = f.index(&mut s, &e);
+    assert_eq!(first.skipped.len(), 2);
+    let opts = IndexOptions {
+        exclude: &[],
+        chunk_max_tokens: 450,
+        budget: None,
+        rebuild: false,
+    };
+    let mut attempted: Vec<String> = Vec::new();
+    let second = index_vault(
+        f.vault.path(),
+        &mut s,
+        &mut f.cache(),
+        &e,
+        &fps("model-a", "fp-a"),
+        &opts,
+        &mut |ev| {
+            if let IndexEvent::File(p) = ev {
+                attempted.push(p.path.to_string());
+            }
+        },
+    )
+    .unwrap();
+    assert_eq!(attempted, Vec::<String>::new());
+    assert_eq!(second.indexed, 0);
+    assert_eq!(second.skipped, first.skipped);
+    assert_eq!(
+        second
+            .skipped
+            .iter()
+            .map(|s| s.path.as_str())
+            .collect::<Vec<_>>(),
+        ["bad.md", "latin1.md"]
+    );
+    assert!(second.skipped[0].reason.contains("BOOM"));
+}
+
+#[test]
+fn deleted_skipped_file_leaves_the_report_and_the_table() {
+    let f = Fixture::new();
+    f.write("ok.md", "fine\n");
+    fs::write(f.path("latin1.md"), [0xff, 0xfe, 0x00]).unwrap();
+    let (mut s, e) = (f.store(), FakeEmbedder::new(8));
+    assert_eq!(f.index(&mut s, &e).skipped.len(), 1);
+    fs::remove_file(f.path("latin1.md")).unwrap();
+    let r = f.index(&mut s, &e);
+    assert_eq!(skipped_paths(&r), []);
+    assert!(s.skipped_states().unwrap().is_empty());
+}
+
+#[test]
+fn rebuild_retries_skipped_files() {
+    let f = Fixture::new();
+    f.write("bad.md", "contains BOOM\n");
+    let mut s = f.store();
+    let failing = FakeEmbedder::new(8).failing_on("BOOM");
+    assert_eq!(f.index(&mut s, &failing).skipped.len(), 1);
+    // Only a rebuild may re-attempt it: the file is unchanged on disk.
+    let working = FakeEmbedder::new(8);
+    let r = f.run(&mut s, &working, &fps("model-a", "fp-a"), &[], None, true);
+    assert_eq!((r.indexed, r.skipped.len()), (1, 0));
+    assert_eq!(paths(&s), ["bad.md"]);
+    assert!(s.skipped_states().unwrap().is_empty());
+}
+
+#[test]
+fn changed_skipped_file_is_retried_and_its_row_removed() {
+    let f = Fixture::new();
+    f.write("ok.md", "fine\n");
+    fs::write(f.path("bad.md"), [0xff, 0xfe, 0x00]).unwrap();
+    let (mut s, e) = (f.store(), FakeEmbedder::new(8));
+    f.index(&mut s, &e);
+    f.write("bad.md", "now valid text\n");
+    let r = f.index(&mut s, &e);
+    assert_eq!((r.indexed, r.skipped.len()), (1, 0));
+    assert!(s.skipped_states().unwrap().is_empty());
+}
+
+#[test]
+fn schema_rebuild_clears_skipped_rows() {
+    let f = Fixture::new();
+    fs::write(f.path("bad.md"), [0xff, 0xfe, 0x00]).unwrap();
+    let (mut s, e) = (f.store(), FakeEmbedder::new(8));
+    f.index(&mut s, &e);
+    assert_eq!(s.skipped_states().unwrap().len(), 1);
+    s.rebuild(&fps("model-a", "fp-a"), "fake", 8).unwrap();
+    assert!(s.skipped_states().unwrap().is_empty());
+}
+
+#[test]
+fn previously_indexed_file_that_becomes_unindexable_loses_its_index_rows() {
+    let f = Fixture::new();
+    f.write("a.md", "uniqueoldword here\n");
+    f.write("ok.md", "fine\n");
+    let (mut s, e) = (f.store(), FakeEmbedder::new(8));
+    f.index(&mut s, &e);
+    fs::write(f.path("a.md"), [0xff, 0xfe, 0x00]).unwrap();
+    let r = f.index(&mut s, &e);
+    assert_eq!(
+        skipped_paths(&r).iter().map(|p| p.0).collect::<Vec<_>>(),
+        ["a.md"]
+    );
+    assert_eq!(paths(&s), ["ok.md"]);
+    let hits: i64 = s
+        .conn()
+        .query_row(
+            "SELECT count(*) FROM chunks_fts WHERE chunks_fts MATCH '\"uniqueoldword\"'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(hits, 0);
+    assert_eq!(s.stats().unwrap().0, 1);
+}
+
+#[test]
+fn stored_skips_stay_in_the_report_when_the_run_is_stopped_by_the_budget() {
+    let f = Fixture::new();
+    f.write("ok.md", "fine\n");
+    fs::write(f.path("bad.md"), [0xff, 0xfe, 0x00]).unwrap();
+    let (mut s, e) = (f.store(), FakeEmbedder::new(8));
+    f.index(&mut s, &e);
+    fs::remove_file(f.path("bad.md")).unwrap();
+    f.write("new.md", "gamma\n");
+    let r = f.index_with(&mut s, &e, "fp-a", &[], Some(Duration::ZERO));
+    assert_eq!(r.remaining, 1);
+    assert_eq!(
+        skipped_paths(&r).iter().map(|p| p.0).collect::<Vec<_>>(),
+        ["bad.md"]
+    );
+}
+
+#[test]
+fn refailure_of_a_changed_skipped_file_overwrites_the_stored_state() {
+    let f = Fixture::new();
+    f.write("bad.md", "contains BOOM\n");
+    let (mut s, e) = (f.store(), FakeEmbedder::new(8).failing_on("BOOM"));
+    f.index(&mut s, &e);
+    let before = s.skipped_states().unwrap()["bad.md"].clone();
+    fs::write(f.path("bad.md"), [0xff, 0xfe, 0x00, 0x01]).unwrap();
+    f.index(&mut s, &e);
+    let after = s.skipped_states().unwrap()["bad.md"].clone();
+    assert_eq!(after.size, 4);
+    assert_ne!(after.size, before.size);
+    assert_ne!(after.reason, before.reason);
 }
