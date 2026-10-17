@@ -1,0 +1,103 @@
+# Evaluation queries (spec §7). Each query is paraphrased so that it rarely shares words with the
+# answer; a hit counts when one of the top 5 results is in `path` and its heading path contains
+# `heading`.
+
+[[query]]
+text = "病院に行くときの電車代は控除の対象になる？"
+path = "家計/医療費控除.md"
+heading = "対象になる費用"
+
+[[query]]
+text = "治療費のレシートはいつまで取っておけばいい"
+path = "家計/医療費控除.md"
+heading = "申告の手順"
+
+[[query]]
+text = "確定申告をしないで寄付の控除を受ける方法"
+path = "家計/ふるさと納税.md"
+heading = "ワンストップ特例"
+
+[[query]]
+text = "寄付できる金額の限度を知りたい"
+path = "家計/ふるさと納税.md"
+heading = "上限額の目安"
+
+[[query]]
+text = "毎週の振り返りはいつどうやってやる"
+path = "仕事/週次レビュー.md"
+heading = "進め方"
+
+[[query]]
+text = "サービスが落ちたとき最初にやること"
+path = "仕事/障害対応手順.md"
+heading = "一次対応"
+
+[[query]]
+text = "犯人探しをしない事後の振り返り"
+path = "仕事/障害対応手順.md"
+heading = "ポストモーテム"
+
+[[query]]
+text = "読み込みと書き込みを同時にできるジャーナル方式"
+path = "技術/SQLite.md"
+heading = "WAL モード"
+
+[[query]]
+text = "日本語の部分一致検索をデータベースでやる方法"
+path = "技術/SQLite.md"
+heading = "FTS5"
+
+[[query]]
+text = "参照を渡すときの決まりごと"
+path = "技術/Rust の所有権.md"
+heading = "借用"
+
+[[query]]
+text = "コンテナのサイズを減らしたい"
+path = "技術/Docker.md"
+heading = "イメージを小さくする"
+
+[[query]]
+text = "寒い時期の鉢植えに水をあげる頻度"
+path = "生活/観葉植物.md"
+heading = "水やり"
+
+[[query]]
+text = "鉢が根でいっぱいになったら"
+path = "生活/観葉植物.md"
+heading = "植え替え"
+
+[[query]]
+text = "転居の前に役所でする手続き"
+path = "生活/引っ越しチェックリスト.md"
+heading = "二週間前"
+
+[[query]]
+text = "カレーをおいしくする秘訣"
+path = "料理/カレー.md"
+heading = "コツ"
+
+[[query]]
+text = "漬物がすっぱくなりすぎた"
+path = "料理/ぬか漬け.md"
+heading = "失敗したとき"
+
+[[query]]
+text = "新しい習慣を続けるための工夫"
+path = "読書/習慣の本.md"
+heading = "要点"
+
+[[query]]
+text = "秋に色づいた木々を見に行くならどこ"
+path = "旅行/京都.md"
+heading = "紅葉の名所"
+
+[[query]]
+text = "夜なかなか眠れないときの対策"
+path = "健康/睡眠.md"
+heading = "寝つきを良くする"
+
+[[query]]
+text = "英単語を忘れないための復習のしかた"
+path = "英語/勉強法.md"
+heading = "単語の覚え方"
