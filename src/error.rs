@@ -42,6 +42,10 @@ pub enum Error {
     SchemaTooNew { found: i64, supported: i64 },
     #[error("the index settings changed while this process was running; restart it")]
     FingerprintChanged,
+    #[error("invalid query: {0}")]
+    InvalidQuery(String),
+    #[error("the index is missing or was built with other settings; run `notrieve index`")]
+    IndexNotReady,
     #[error("{0} is not valid UTF-8")]
     NotUtf8(String),
     #[error("{path}: {source}")]
