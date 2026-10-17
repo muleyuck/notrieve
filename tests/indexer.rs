@@ -3,9 +3,17 @@ use std::path::Path;
 use std::time::{Duration, SystemTime};
 
 use notrieve::embed::fake::FakeEmbedder;
-use notrieve::indexer::{IndexOptions, IndexReport, index_vault};
-use notrieve::store::Store;
+use notrieve::fingerprint::Fingerprints;
+use notrieve::indexer::{IndexEvent, IndexOptions, IndexReport, index_vault};
+use notrieve::store::{RebuildReason, Store};
 use tempfile::TempDir;
+
+fn fps(model: &str, index: &str) -> Fingerprints {
+    Fingerprints {
+        model: model.into(),
+        index: index.into(),
+    }
+}
 
 struct Fixture {
     vault: TempDir,
@@ -34,6 +42,25 @@ impl Fixture {
         Store::open(&self.data.path().join("index.db")).unwrap()
     }
 
+    fn run(
+        &self,
+        store: &mut Store,
+        e: &FakeEmbedder,
+        fps: &Fingerprints,
+        exclude: &[&str],
+        budget: Option<Duration>,
+        rebuild: bool,
+    ) -> IndexReport {
+        let exclude: Vec<String> = exclude.iter().map(|s| s.to_string()).collect();
+        let opts = IndexOptions {
+            exclude: &exclude,
+            chunk_max_tokens: 450,
+            budget,
+            rebuild,
+        };
+        index_vault(self.vault.path(), store, e, fps, &opts, &mut |_| {}).unwrap()
+    }
+
     fn index_with(
         &self,
         store: &mut Store,
@@ -42,13 +69,7 @@ impl Fixture {
         exclude: &[&str],
         budget: Option<Duration>,
     ) -> IndexReport {
-        let exclude: Vec<String> = exclude.iter().map(|s| s.to_string()).collect();
-        let opts = IndexOptions {
-            exclude: &exclude,
-            chunk_max_tokens: 450,
-            budget,
-        };
-        index_vault(self.vault.path(), store, e, fp, &opts, &mut |_| {}).unwrap()
+        self.run(store, e, &fps("model-a", fp), exclude, budget, false)
     }
 
     fn index(&self, store: &mut Store, e: &FakeEmbedder) -> IndexReport {
@@ -378,8 +399,16 @@ fn invalid_exclude_fails_before_a_fingerprint_rebuild_wipes_the_index() {
         exclude: &bad,
         chunk_max_tokens: 450,
         budget: None,
+        rebuild: false,
     };
-    let result = index_vault(f.vault.path(), &mut s, &e, "fp-b", &opts, &mut |_| {});
+    let result = index_vault(
+        f.vault.path(),
+        &mut s,
+        &e,
+        &fps("model-a", "fp-b"),
+        &opts,
+        &mut |_| {},
+    );
     assert!(result.is_err());
     assert_eq!(paths(&s), ["a.md"]);
     let r = f.index_with(&mut s, &e, "fp-b", &["drafts/**"], None);
@@ -397,8 +426,16 @@ fn malformed_gitignore_line_is_an_error_and_well_formed_one_is_complete() {
         exclude: &[],
         chunk_max_tokens: 450,
         budget: None,
+        rebuild: false,
     };
-    let result = index_vault(f.vault.path(), &mut s, &e, "fp-a", &opts, &mut |_| {});
+    let result = index_vault(
+        f.vault.path(),
+        &mut s,
+        &e,
+        &fps("model-a", "fp-a"),
+        &opts,
+        &mut |_| {},
+    );
     assert!(result.is_err());
     assert!(paths(&s).is_empty());
     f.write(".gitignore", "private/\n");
@@ -439,8 +476,102 @@ fn malformed_parent_gitignore_is_an_error() {
         exclude: &[],
         chunk_max_tokens: 450,
         budget: None,
+        rebuild: false,
     };
-    let result = index_vault(&vault, &mut s, &e, "fp-a", &opts, &mut |_| {});
+    let result = index_vault(
+        &vault,
+        &mut s,
+        &e,
+        &fps("model-a", "fp-a"),
+        &opts,
+        &mut |_| {},
+    );
     assert!(result.is_err());
     assert!(paths(&s).is_empty());
+}
+
+#[test]
+fn rebuild_reason_tells_a_model_change_from_a_settings_change() {
+    let f = Fixture::new();
+    f.write("a.md", "alpha\n");
+    let (mut s, e) = (f.store(), FakeEmbedder::new(8));
+    let first = f.run(&mut s, &e, &fps("model-a", "fp-a"), &[], None, false);
+    assert_eq!(first.rebuild_reason, Some(RebuildReason::NewIndex));
+    let settings = f.run(&mut s, &e, &fps("model-a", "fp-b"), &[], None, false);
+    assert_eq!(
+        settings.rebuild_reason,
+        Some(RebuildReason::SettingsChanged)
+    );
+    let model = f.run(&mut s, &e, &fps("model-b", "fp-c"), &[], None, false);
+    assert_eq!(model.rebuild_reason, Some(RebuildReason::ModelChanged));
+    let unchanged = f.run(&mut s, &e, &fps("model-b", "fp-c"), &[], None, false);
+    assert_eq!((unchanged.rebuilt, unchanged.rebuild_reason), (false, None));
+}
+
+#[test]
+fn explicit_rebuild_with_matching_fingerprints_is_reported_as_requested() {
+    let f = Fixture::new();
+    f.write("a.md", "alpha\n");
+    let (mut s, e) = (f.store(), FakeEmbedder::new(8));
+    f.index(&mut s, &e);
+    let r = f.run(&mut s, &e, &fps("model-a", "fp-a"), &[], None, true);
+    assert_eq!(
+        (r.rebuilt, r.rebuild_reason, r.indexed),
+        (true, Some(RebuildReason::Requested), 1)
+    );
+}
+
+#[test]
+fn rebuilding_is_announced_before_any_file_starts() {
+    let f = Fixture::new();
+    f.write("a.md", "alpha\n");
+    f.write("b.md", "beta\n");
+    let (mut s, e) = (f.store(), FakeEmbedder::new(8));
+    let opts = IndexOptions {
+        exclude: &[],
+        chunk_max_tokens: 450,
+        budget: None,
+        rebuild: false,
+    };
+    let mut events: Vec<String> = Vec::new();
+    index_vault(
+        f.vault.path(),
+        &mut s,
+        &e,
+        &fps("model-a", "fp-a"),
+        &opts,
+        &mut |event| {
+            events.push(match event {
+                IndexEvent::Rebuilding(reason) => format!("rebuild:{reason:?}"),
+                IndexEvent::File(p) => format!("file:{}", p.path),
+            })
+        },
+    )
+    .unwrap();
+    assert_eq!(events, ["rebuild:NewIndex", "file:a.md", "file:b.md"]);
+}
+
+#[test]
+fn invalid_exclude_with_an_explicit_rebuild_keeps_the_index() {
+    let f = Fixture::new();
+    f.write("a.md", "alpha\n");
+    let (mut s, e) = (f.store(), FakeEmbedder::new(8));
+    f.index(&mut s, &e);
+    let bad = vec!["[".to_string()];
+    let opts = IndexOptions {
+        exclude: &bad,
+        chunk_max_tokens: 450,
+        budget: None,
+        rebuild: true,
+    };
+    let result = index_vault(
+        f.vault.path(),
+        &mut s,
+        &e,
+        &fps("model-a", "fp-a"),
+        &opts,
+        &mut |_| {},
+    );
+    assert!(result.is_err());
+    assert_eq!(paths(&s), ["a.md"]);
 }

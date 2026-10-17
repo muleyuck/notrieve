@@ -4,9 +4,10 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use crate::embed::Embedder;
+use crate::fingerprint::Fingerprints;
 use crate::markdown::chunk::{MERGE_BELOW_TOKENS, chunk_note};
 use crate::markdown::{parse_note, title_from_path};
-use crate::store::{ChunkRecord, FileRecord, Store};
+use crate::store::{ChunkRecord, FileRecord, RebuildReason, Store};
 use crate::{Error, Result};
 use scan::{ScanEntry, plan_changes, scan_vault};
 
@@ -17,6 +18,8 @@ pub struct IndexOptions<'a> {
     /// When the budget stops a run, deletions are deferred to a later run.
     /// `IndexReport::remaining` counts unprocessed files plus deferred deletions.
     pub budget: Option<Duration>,
+    /// Rebuild even when the stored fingerprints match (`index --rebuild`).
+    pub rebuild: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,6 +38,7 @@ pub struct IndexReport {
     pub skipped: Vec<SkippedFile>,
     pub scan_complete: bool,
     pub rebuilt: bool,
+    pub rebuild_reason: Option<RebuildReason>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,20 +48,34 @@ pub struct Progress<'a> {
     pub path: &'a str,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndexEvent<'a> {
+    /// Sent before the index is dropped, so the user sees why the run takes long.
+    Rebuilding(RebuildReason),
+    File(Progress<'a>),
+}
+
 pub fn index_vault<E: Embedder + ?Sized>(
     root: &Path,
     store: &mut Store,
     embedder: &E,
-    fingerprint: &str,
+    fps: &Fingerprints,
     opts: &IndexOptions<'_>,
-    progress: &mut dyn FnMut(&Progress<'_>),
+    on_event: &mut dyn FnMut(IndexEvent<'_>),
 ) -> Result<IndexReport> {
     let started = Instant::now();
     let mut report = IndexReport::default();
+    // Scan first: invalid exclude or ignore rules must fail before anything is dropped.
     let scan = scan_vault(root, opts.exclude)?;
-    if store.needs_rebuild(fingerprint)? {
-        store.rebuild(fingerprint, embedder.model_id(), embedder.dim())?;
+    let reason = match store.rebuild_reason(fps)? {
+        None if opts.rebuild => Some(RebuildReason::Requested),
+        other => other,
+    };
+    if let Some(reason) = reason {
+        on_event(IndexEvent::Rebuilding(reason));
+        store.rebuild(fps, embedder.model_id(), embedder.dim())?;
         report.rebuilt = true;
+        report.rebuild_reason = Some(reason);
     }
     for err in &scan.errors {
         tracing::warn!("{err}");
@@ -84,11 +102,11 @@ pub fn index_vault<E: Embedder + ?Sized>(
             finished = false;
             break;
         }
-        progress(&Progress {
+        on_event(IndexEvent::File(Progress {
             done,
             total,
             path: &entry.rel,
-        });
+        }));
         let bytes = match std::fs::read(&entry.abs) {
             Ok(bytes) => bytes,
             Err(e) => {
@@ -104,7 +122,7 @@ pub fn index_vault<E: Embedder + ?Sized>(
             .get(&entry.rel)
             .is_some_and(|s| s.content_hash == hash)
         {
-            store.touch_file(fingerprint, &entry.rel, entry.mtime_ns, entry.size)?;
+            store.touch_file(&fps.index, &entry.rel, entry.mtime_ns, entry.size)?;
             report.touched += 1;
             continue;
         }
@@ -117,7 +135,7 @@ pub fn index_vault<E: Embedder + ?Sized>(
             });
             if let Some(index) = source {
                 let old = deleted.remove(index);
-                store.rename_file(fingerprint, &old, &entry.rel, entry.mtime_ns, entry.size)?;
+                store.rename_file(&fps.index, &old, &entry.rel, entry.mtime_ns, entry.size)?;
                 report.renamed += 1;
                 continue;
             }
@@ -125,7 +143,7 @@ pub fn index_vault<E: Embedder + ?Sized>(
         match index_file(
             store,
             embedder,
-            fingerprint,
+            &fps.index,
             opts.chunk_max_tokens,
             entry,
             bytes,
@@ -152,7 +170,7 @@ pub fn index_vault<E: Embedder + ?Sized>(
             report.remaining += deleted.len();
         } else {
             for path in &deleted {
-                store.delete_file(fingerprint, path)?;
+                store.delete_file(&fps.index, path)?;
                 report.deleted += 1;
             }
         }

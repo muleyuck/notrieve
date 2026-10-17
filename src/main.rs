@@ -213,6 +213,7 @@ fn print_event(event: Event<'_>) {
             eprintln!("downloading {file}")
         }
         Event::Download(DownloadEvent::Finished { .. }) => {}
+        Event::Rebuilding(reason) => eprintln!("{reason}"),
         Event::Indexing(p) => eprintln!("[{}/{}] {}", p.done + 1, p.total, p.path),
         Event::CorruptDbMoved(path) => {
             eprintln!("moved the unreadable database to {}", path.display())

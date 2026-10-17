@@ -5,10 +5,10 @@ use crate::config::{self, Registry, Vault};
 use crate::embed::OnnxEmbedder;
 use crate::embed::download::{DownloadEvent, ensure_model, with_model};
 use crate::embed::onnx::resolve_threads;
-use crate::fingerprint::index_fingerprint;
-use crate::indexer::{self, IndexOptions, IndexReport, Progress};
+use crate::fingerprint::{Fingerprints, fingerprints};
+use crate::indexer::{self, IndexEvent, IndexOptions, IndexReport, Progress};
 use crate::lock;
-use crate::store::Store;
+use crate::store::{RebuildReason, Store};
 use crate::{Error, Result};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,6 +30,7 @@ impl Paths {
 pub enum Event<'a> {
     WaitingForLock,
     Download(DownloadEvent<'a>),
+    Rebuilding(RebuildReason),
     Indexing(Progress<'a>),
     CorruptDbMoved(&'a Path),
 }
@@ -107,9 +108,37 @@ pub fn index(
     on_event: &mut dyn FnMut(Event<'_>),
 ) -> Result<IndexReport> {
     let _lock = acquire(vault, request.wait, on_event)?;
+    let (embedder, fps) = load_model(vault, paths, on_event)?;
+    let db = vault.db_path();
+    let mut store = if request.rebuild {
+        let (store, moved) = Store::open_for_rebuild(&db)?;
+        if let Some(moved) = &moved {
+            on_event(Event::CorruptDbMoved(moved));
+        }
+        store
+    } else {
+        Store::open(&db)?
+    };
+    let opts = IndexOptions {
+        exclude: &vault.config.exclude,
+        chunk_max_tokens: vault.config.chunk_max_tokens,
+        budget: request.budget,
+        rebuild: request.rebuild,
+    };
+    indexer::index_vault(&vault.root, &mut store, &embedder, &fps, &opts, &mut |e| {
+        forward(e, on_event)
+    })
+}
+
+/// Loads the vault's model and computes its fingerprints while the model cache lock is held.
+pub fn load_model(
+    vault: &Vault,
+    paths: &Paths,
+    on_event: &mut dyn FnMut(Event<'_>),
+) -> Result<(OnnxEmbedder, Fingerprints)> {
     let contract = vault.config.model.resolve(&vault.root)?;
     let max = vault.config.chunk_max_tokens;
-    let (embedder, fingerprint) = with_model(
+    with_model(
         &contract,
         &paths.model_cache,
         false,
@@ -118,36 +147,17 @@ pub fn index(
             let embedder =
                 OnnxEmbedder::load(&contract, dir, resolve_threads(vault.config.index_threads))?;
             check_chunk_limit(max, embedder.effective_max_tokens())?;
-            let fingerprint = index_fingerprint(&contract, dir, max)?;
-            Ok((embedder, fingerprint))
+            let fps = fingerprints(&contract, dir, max)?;
+            Ok((embedder, fps))
         },
-    )?;
-    let db = vault.db_path();
-    let mut store = if request.rebuild {
-        let (mut store, moved) = Store::open_for_rebuild(&db)?;
-        if let Some(moved) = &moved {
-            on_event(Event::CorruptDbMoved(moved));
-        }
-        store.rebuild(&fingerprint, &contract.id, contract.dim)?;
-        store
-    } else {
-        Store::open(&db)?
-    };
-    let opts = IndexOptions {
-        exclude: &vault.config.exclude,
-        chunk_max_tokens: max,
-        budget: request.budget,
-    };
-    let mut report = indexer::index_vault(
-        &vault.root,
-        &mut store,
-        &embedder,
-        &fingerprint,
-        &opts,
-        &mut |p| on_event(Event::Indexing(*p)),
-    )?;
-    report.rebuilt |= request.rebuild;
-    Ok(report)
+    )
+}
+
+fn forward(event: IndexEvent<'_>, on_event: &mut dyn FnMut(Event<'_>)) {
+    on_event(match event {
+        IndexEvent::Rebuilding(reason) => Event::Rebuilding(reason),
+        IndexEvent::File(progress) => Event::Indexing(progress),
+    });
 }
 
 /// Spec §4.3: `chunk_max_tokens` above the model's effective limit is a configuration error.

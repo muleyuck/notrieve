@@ -3,8 +3,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Once;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use std::fmt;
+
 use rusqlite::{Connection, ErrorCode, OptionalExtension, Transaction, params};
 
+use crate::fingerprint::Fingerprints;
 use crate::{Error, Result};
 
 pub const SCHEMA_VERSION: i64 = 1;
@@ -39,6 +42,32 @@ pub struct FileState {
     pub size: i64,
     pub content_hash: String,
     pub title: String,
+}
+
+/// Why `index_vault` rebuilds the index; shown to the user (spec §4.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RebuildReason {
+    NewIndex,
+    Requested,
+    SchemaChanged,
+    ModelChanged,
+    SettingsChanged,
+}
+
+impl fmt::Display for RebuildReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            RebuildReason::NewIndex => "building a new index",
+            RebuildReason::Requested => "rebuilding the index as requested",
+            RebuildReason::SchemaChanged => "rebuilding the index because notrieve was updated",
+            RebuildReason::ModelChanged => {
+                "rebuilding the index because the model changed; every chunk is embedded again"
+            }
+            RebuildReason::SettingsChanged => {
+                "rebuilding the index because notrieve or the chunk settings changed"
+            }
+        })
+    }
 }
 
 pub struct Store {
@@ -156,12 +185,33 @@ impl Store {
             || self.fingerprint()?.as_deref() != Some(fingerprint))
     }
 
-    pub fn rebuild(&mut self, fingerprint: &str, model_id: &str, dim: usize) -> Result<()> {
+    /// `None` when the index matches the schema and both fingerprints.
+    pub fn rebuild_reason(&self, fps: &Fingerprints) -> Result<Option<RebuildReason>> {
+        let Some(version) = self.schema_version()? else {
+            return Ok(Some(RebuildReason::NewIndex));
+        };
+        if self
+            .meta("model_fingerprint")?
+            .is_some_and(|stored| stored != fps.model)
+        {
+            return Ok(Some(RebuildReason::ModelChanged));
+        }
+        if version != SCHEMA_VERSION {
+            return Ok(Some(RebuildReason::SchemaChanged));
+        }
+        if self.fingerprint()?.as_deref() != Some(fps.index.as_str()) {
+            return Ok(Some(RebuildReason::SettingsChanged));
+        }
+        Ok(None)
+    }
+
+    pub fn rebuild(&mut self, fps: &Fingerprints, model_id: &str, dim: usize) -> Result<()> {
         let tx = self.conn.transaction()?;
         tx.execute_batch(&SCHEMA_SQL.replace("{dim}", &dim.to_string()))?;
         let entries = [
             ("schema_version", SCHEMA_VERSION.to_string()),
-            ("index_fingerprint", fingerprint.to_string()),
+            ("index_fingerprint", fps.index.clone()),
+            ("model_fingerprint", fps.model.clone()),
             ("model_id", model_id.to_string()),
             ("dim", dim.to_string()),
         ];
@@ -424,9 +474,16 @@ mod tests {
             .unwrap()
     }
 
+    fn fps(index: &str) -> Fingerprints {
+        Fingerprints {
+            model: "model-a".into(),
+            index: index.into(),
+        }
+    }
+
     fn rebuilt(dir: &TempDir, fp: &str, dim: usize) -> Store {
         let mut s = Store::open(&dir.path().join("index.db")).unwrap();
-        s.rebuild(fp, "fake", dim).unwrap();
+        s.rebuild(&fps(fp), "fake", dim).unwrap();
         s
     }
 
@@ -566,7 +623,7 @@ mod tests {
         let mut s = rebuilt(&dir, "fp-a", 4);
         s.write_file("fp-a", &file("a.md"), &[chunk(0, "a", 4)])
             .unwrap();
-        s.rebuild("fp-b", "fake", 8).unwrap();
+        s.rebuild(&fps("fp-b"), "fake", 8).unwrap();
         assert_eq!(count(&s, "files"), 0);
         s.write_file("fp-b", &file("a.md"), &[chunk(0, "a", 8)])
             .unwrap();
@@ -597,7 +654,7 @@ mod tests {
         ));
         let (mut s, moved) = Store::open_for_rebuild(&path).unwrap();
         assert_eq!(moved, None);
-        s.rebuild("fp-a", "fake", 4).unwrap();
+        s.rebuild(&fps("fp-a"), "fake", 4).unwrap();
         assert!(!s.needs_rebuild("fp-a").unwrap());
     }
 
@@ -643,7 +700,7 @@ mod tests {
                 .to_string_lossy()
                 .contains("index.db.corrupt-")
         );
-        s.rebuild("fp-a", "fake", 4).unwrap();
+        s.rebuild(&fps("fp-a"), "fake", 4).unwrap();
         assert!(!s.needs_rebuild("fp-a").unwrap());
     }
 
@@ -721,7 +778,7 @@ mod tests {
         let moved = moved.unwrap();
         assert!(moved.to_string_lossy().contains("index.db.corrupt-"));
         assert_eq!(std::fs::read(&moved).unwrap(), vec![b'x'; 4096]);
-        s.rebuild("fp-a", "fake", 4).unwrap();
+        s.rebuild(&fps("fp-a"), "fake", 4).unwrap();
         assert!(!s.needs_rebuild("fp-a").unwrap());
     }
 
@@ -750,5 +807,74 @@ mod tests {
         .unwrap();
         let third = quarantine_at(&path, 1000).unwrap();
         assert_eq!(third, dir.path().join("index.db.corrupt-1000-3"));
+    }
+
+    #[test]
+    fn fresh_database_is_a_new_index() {
+        let dir = TempDir::new().unwrap();
+        let s = Store::open(&dir.path().join("index.db")).unwrap();
+        assert_eq!(
+            s.rebuild_reason(&fps("fp-a")).unwrap(),
+            Some(RebuildReason::NewIndex)
+        );
+    }
+
+    #[test]
+    fn matching_fingerprints_need_no_rebuild() {
+        let dir = TempDir::new().unwrap();
+        let s = rebuilt(&dir, "fp-a", 4);
+        assert_eq!(s.rebuild_reason(&fps("fp-a")).unwrap(), None);
+    }
+
+    #[test]
+    fn other_index_fingerprint_with_the_same_model_is_a_settings_change() {
+        let dir = TempDir::new().unwrap();
+        let s = rebuilt(&dir, "fp-a", 4);
+        assert_eq!(
+            s.rebuild_reason(&fps("fp-b")).unwrap(),
+            Some(RebuildReason::SettingsChanged)
+        );
+    }
+
+    #[test]
+    fn model_change_wins_over_an_old_schema_and_an_old_schema_alone_is_a_schema_change() {
+        let dir = TempDir::new().unwrap();
+        let s = rebuilt(&dir, "fp-a", 4);
+        s.conn()
+            .execute(
+                "UPDATE meta SET value = '0' WHERE key = 'schema_version'",
+                [],
+            )
+            .unwrap();
+        let other_model = Fingerprints {
+            model: "model-b".into(),
+            index: "fp-a".into(),
+        };
+        assert_eq!(
+            s.rebuild_reason(&other_model).unwrap(),
+            Some(RebuildReason::ModelChanged)
+        );
+        assert_eq!(
+            s.rebuild_reason(&fps("fp-a")).unwrap(),
+            Some(RebuildReason::SchemaChanged)
+        );
+    }
+
+    #[test]
+    fn index_without_a_recorded_model_fingerprint_reports_a_settings_change() {
+        // Indexes written by plan 1 have no model_fingerprint row.
+        let dir = TempDir::new().unwrap();
+        let s = rebuilt(&dir, "fp-a", 4);
+        s.conn()
+            .execute("DELETE FROM meta WHERE key = 'model_fingerprint'", [])
+            .unwrap();
+        let other_model = Fingerprints {
+            model: "model-b".into(),
+            index: "fp-b".into(),
+        };
+        assert_eq!(
+            s.rebuild_reason(&other_model).unwrap(),
+            Some(RebuildReason::SettingsChanged)
+        );
     }
 }

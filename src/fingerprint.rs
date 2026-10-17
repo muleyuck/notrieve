@@ -7,12 +7,26 @@ use crate::embed::onnx::required_files;
 use crate::markdown::chunk::{CHUNKER_VERSION, MERGE_BELOW_TOKENS};
 use crate::{Error, Result};
 
-/// Hash of every input that changes index contents (spec §4.1).
-pub fn index_fingerprint(
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Fingerprints {
+    /// Model contract and model files; also keys the embedding cache (spec §4.1).
+    pub model: String,
+    /// `model` plus the chunk settings, recorded as `index_fingerprint`.
+    pub index: String,
+}
+
+pub fn fingerprints(
     contract: &ModelContract,
     model_dir: &Path,
     chunk_max_tokens: usize,
-) -> Result<String> {
+) -> Result<Fingerprints> {
+    let model = model_fingerprint(contract, model_dir)?;
+    let index = index_fingerprint(&model, chunk_max_tokens);
+    Ok(Fingerprints { model, index })
+}
+
+/// Hash of the model contract and every model file.
+pub fn model_fingerprint(contract: &ModelContract, model_dir: &Path) -> Result<String> {
     let mut hasher = blake3::Hasher::new();
     let contract_json = serde_json::to_string(contract).map_err(|e| Error::Model(e.to_string()))?;
     hasher.update(contract_json.as_bytes());
@@ -20,13 +34,20 @@ pub fn index_fingerprint(
         hasher.update(file.as_bytes());
         hasher.update(file_hash(&model_dir.join(file))?.as_bytes());
     }
+    Ok(hasher.finalize().to_hex().to_string())
+}
+
+/// Hash of every input that changes index contents (spec §4.1).
+pub fn index_fingerprint(model_fingerprint: &str, chunk_max_tokens: usize) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(model_fingerprint.as_bytes());
     hasher.update(
         format!(
-            "chunker={CHUNKER_VERSION};max={chunk_max_tokens};merge_below={MERGE_BELOW_TOKENS}"
+            ";chunker={CHUNKER_VERSION};max={chunk_max_tokens};merge_below={MERGE_BELOW_TOKENS}"
         )
         .as_bytes(),
     );
-    Ok(hasher.finalize().to_hex().to_string())
+    hasher.finalize().to_hex().to_string()
 }
 
 /// Content hash cached next to the file, keyed by size and mtime, so large ONNX files are hashed once.
@@ -95,38 +116,51 @@ mod tests {
     }
 
     #[test]
-    fn same_inputs_give_the_same_fingerprint() {
+    fn same_inputs_give_the_same_fingerprints() {
         let dir = TempDir::new().unwrap();
         let c = model(dir.path());
         assert_eq!(
-            index_fingerprint(&c, dir.path(), 450).unwrap(),
-            index_fingerprint(&c, dir.path(), 450).unwrap()
+            fingerprints(&c, dir.path(), 450).unwrap(),
+            fingerprints(&c, dir.path(), 450).unwrap()
         );
     }
 
     #[test]
-    fn changing_a_tokenizer_side_file_changes_the_fingerprint() {
+    fn changing_a_tokenizer_side_file_changes_both_fingerprints() {
         let dir = TempDir::new().unwrap();
         let c = model(dir.path());
-        let before = index_fingerprint(&c, dir.path(), 450).unwrap();
+        let before = fingerprints(&c, dir.path(), 450).unwrap();
         fs::write(
             dir.path().join("special_tokens_map.json"),
             "changed special tokens",
         )
         .unwrap();
-        assert_ne!(index_fingerprint(&c, dir.path(), 450).unwrap(), before);
+        let after = fingerprints(&c, dir.path(), 450).unwrap();
+        assert_ne!(after.model, before.model);
+        assert_ne!(after.index, before.index);
     }
 
     #[test]
-    fn changing_chunk_max_tokens_or_the_contract_changes_the_fingerprint() {
+    fn chunk_max_tokens_changes_only_the_index_fingerprint() {
         let dir = TempDir::new().unwrap();
         let c = model(dir.path());
-        let base = index_fingerprint(&c, dir.path(), 450).unwrap();
-        assert_ne!(index_fingerprint(&c, dir.path(), 300).unwrap(), base);
+        let base = fingerprints(&c, dir.path(), 450).unwrap();
+        let other = fingerprints(&c, dir.path(), 300).unwrap();
+        assert_eq!(other.model, base.model);
+        assert_ne!(other.index, base.index);
+    }
+
+    #[test]
+    fn changing_the_contract_changes_the_model_fingerprint() {
+        let dir = TempDir::new().unwrap();
+        let c = model(dir.path());
+        let base = fingerprints(&c, dir.path(), 450).unwrap();
         let other = ModelContract {
             document_prefix: "passage: ".into(),
             ..c
         };
-        assert_ne!(index_fingerprint(&other, dir.path(), 450).unwrap(), base);
+        let changed = fingerprints(&other, dir.path(), 450).unwrap();
+        assert_ne!(changed.model, base.model);
+        assert_ne!(changed.index, base.index);
     }
 }
