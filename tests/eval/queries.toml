@@ -3,101 +3,204 @@
 # `heading`.
 
 [[query]]
-text = "病院に行くときの電車代は控除の対象になる？"
+text = "受診にかかった乗り物代のメモ"
 path = "家計/医療費控除.md"
-heading = "対象になる費用"
+heading = "取っておく領収書"
+
+# why: 英語/勉強法.md is the other English note (no speaking practice there)
+[[query]]
+text = "言葉に詰まったときのしのぎ方"
+path = "英語/英会話.md"
+heading = "間違いを恐れない"
 
 [[query]]
-text = "治療費のレシートはいつまで取っておけばいい"
-path = "家計/医療費控除.md"
-heading = "申告の手順"
-
-[[query]]
-text = "確定申告をしないで寄付の控除を受ける方法"
+text = "自治体へ寄付したあと郵送している書類"
 path = "家計/ふるさと納税.md"
 heading = "ワンストップ特例"
 
 [[query]]
-text = "寄付できる金額の限度を知りたい"
-path = "家計/ふるさと納税.md"
-heading = "上限額の目安"
+text = "シカに囲まれた旅の思い出"
+path = "旅行/奈良.md"
+heading = "公園で鹿に会ったこと"
 
 [[query]]
-text = "毎週の振り返りはいつどうやってやる"
+text = "週末前にやる短い見直しの流れ"
 path = "仕事/週次レビュー.md"
 heading = "進め方"
 
 [[query]]
-text = "サービスが落ちたとき最初にやること"
+text = "サービスが止まったとき真っ先にやること"
 path = "仕事/障害対応手順.md"
 heading = "一次対応"
 
 [[query]]
-text = "犯人探しをしない事後の振り返り"
+text = "犯人探しをしない事後の振り返り会"
 path = "仕事/障害対応手順.md"
 heading = "ポストモーテム"
 
+# why: 技術/PostgreSQL.md WAL と復旧 is the other WAL section
 [[query]]
-text = "読み込みと書き込みを同時にできるジャーナル方式"
+text = "アプリが立ち上がるときにジャーナルの方式を変えている"
 path = "技術/SQLite.md"
 heading = "WAL モード"
 
+# why: 技術/PostgreSQL.md 全文検索 also does partial matching, but not by three-character splitting
 [[query]]
-text = "日本語の部分一致検索をデータベースでやる方法"
+text = "三文字ずつ区切る方式で日本語の本文を引けるようにした"
 path = "技術/SQLite.md"
 heading = "FTS5"
 
+# why: 技術/Rust の所有権.md ライフタイム is also a reference-related review rule
 [[query]]
-text = "参照を渡すときの決まりごと"
+text = "引数は値ごと受け取らずに借りる形でもらうという方針"
 path = "技術/Rust の所有権.md"
 heading = "借用"
 
 [[query]]
-text = "コンテナのサイズを減らしたい"
+text = "コンテナの容量を抑えるための取り決め"
 path = "技術/Docker.md"
 heading = "イメージを小さくする"
 
+# why: 生活/多肉植物.md 水やり is the other watering section (no saucer there)
 [[query]]
-text = "寒い時期の鉢植えに水をあげる頻度"
+text = "鉢の下の皿にたまった水をどうしているか"
 path = "生活/観葉植物.md"
 heading = "水やり"
 
+# why: 家計/医療費控除.md 申告の手順 is also a New Year paperwork step
 [[query]]
-text = "鉢が根でいっぱいになったら"
-path = "生活/観葉植物.md"
-heading = "植え替え"
+text = "年明けに去年の紙類を仕分けて揃える"
+path = "家計/確定申告.md"
+heading = "書類を集める"
 
 [[query]]
-text = "転居の前に役所でする手続き"
+text = "転居前に役所や公共料金で済ませること"
 path = "生活/引っ越しチェックリスト.md"
 heading = "二週間前"
 
+# why: 料理/スパイス.md is the other curry-related note
 [[query]]
-text = "カレーをおいしくする秘訣"
+text = "果物を最後に加える我が家の味つけ"
 path = "料理/カレー.md"
 heading = "コツ"
 
 [[query]]
-text = "漬物がすっぱくなりすぎた"
+text = "漬物の床が酸っぱくなったときの立て直し"
 path = "料理/ぬか漬け.md"
 heading = "失敗したとき"
 
 [[query]]
-text = "新しい習慣を続けるための工夫"
-path = "読書/習慣の本.md"
-heading = "要点"
+text = "読み終わった本の感想をどう残しているか"
+path = "読書/読書の習慣.md"
+heading = "読書メモの取り方"
 
 [[query]]
-text = "秋に色づいた木々を見に行くならどこ"
+text = "秋に色づいた木々を見に行く予定"
 path = "旅行/京都.md"
-heading = "紅葉の名所"
+heading = "紅葉を見に行く計画"
 
+# why: 健康/昼寝.md and 健康/睡眠.md 朝の習慣 touch on sleep but give no bedtime routine
 [[query]]
-text = "夜なかなか眠れないときの対策"
+text = "夜すんなり眠りにつくための決めごと"
 path = "健康/睡眠.md"
 heading = "寝つきを良くする"
 
+# why: 英語/英会話.md also keeps notes of corrected phrases
 [[query]]
-text = "英単語を忘れないための復習のしかた"
+text = "語彙を忘れないための毎晩の見直し"
 path = "英語/勉強法.md"
 heading = "単語の覚え方"
+
+# Same-topic distractors (paraphrased). Each `why` names the section the query must beat.
+
+# why: 生活/観葉植物.md 水やり also covers winter watering (but only longer intervals)
+[[query]]
+text = "冬の三か月は水をやらない鉢"
+path = "生活/多肉植物.md"
+heading = "水やり"
+
+# why: 健康/睡眠.md is the general sleep note
+[[query]]
+text = "午後に横になるのは何分までにしているか"
+path = "健康/昼寝.md"
+heading = "長さの目安"
+
+# why: 料理/カレー.md コツ is the other curry-cooking technique section
+[[query]]
+text = "調理の一番はじめに香辛料の粒を油で熱する"
+path = "料理/スパイス.md"
+heading = "油で香りを出す"
+
+# why: 仕事/週次レビュー.md is the other periodic review
+[[query]]
+text = "ひと月の成果を数値でたしかめる"
+path = "仕事/月次振り返り.md"
+heading = "数字を見る"
+
+# why: 仕事/障害対応手順.md 一次対応 also estimates how many users are affected
+[[query]]
+text = "トラブルの被害の大きさを文書にどう書くか"
+path = "仕事/障害報告書.md"
+heading = "影響範囲の書き方"
+
+# why: 旅行/京都.md 移動 is the other sightseeing-transport section
+[[query]]
+text = "レンタサイクルで観光地を巡った"
+path = "旅行/奈良.md"
+heading = "移動"
+
+# why: 技術/Rust の所有権.md 借用 also limits shared mutation (by design rule, not by a test run)
+[[query]]
+text = "同時に書き換えて壊れるバグを見つけるテストの設定"
+path = "技術/Go の並行処理.md"
+heading = "データ競合"
+
+# why: 家計/医療費控除.md and 家計/ふるさと納税.md are the other household-paperwork notes
+[[query]]
+text = "週末に請け負った仕事の稼ぎと出費をつける"
+path = "家計/確定申告.md"
+heading = "副業の記録"
+
+# why: 技術/SQLite.md FTS5 is the other full-text-search section (no ranking there)
+[[query]]
+text = "品名が合うものを上に並べる検索の仕組み"
+path = "技術/PostgreSQL.md"
+heading = "全文検索"
+
+# Keyword-style queries: terms of 3+ characters reach FTS5, shorter ones go to LIKE.
+
+# why: 技術/SQLite.md WAL モード also has WAL and checkpoint (but no archive)
+[[query]]
+text = "WAL アーカイブ 訓練"
+path = "技術/PostgreSQL.md"
+heading = "WAL と復旧"
+
+# why: 家計/確定申告.md 書類を集める also handles donation receipts
+[[query]]
+text = "ふるさと納税 上限 計算"
+path = "家計/ふるさと納税.md"
+heading = "上限額の目安"
+
+# why: 家計/確定申告.md 書類を集める also handles hospital receipts (but not how long they are kept)
+[[query]]
+text = "医療費控除 領収書 保管期間"
+path = "家計/医療費控除.md"
+heading = "申告の手順"
+
+# why: 技術/PostgreSQL.md 全文検索 also mentions 検索 (but not trigram)
+[[query]]
+text = "trigram 日本語 検索"
+path = "技術/SQLite.md"
+heading = "FTS5"
+
+# why: 技術/Go の並行処理.md 起動 also mentions goroutine and stopping it
+[[query]]
+text = "goroutine 終了 待つ"
+path = "技術/Go の並行処理.md"
+heading = "終了を待つ"
+
+# why: 料理/スパイス.md 油で香りを出す also mentions 玉ねぎ
+[[query]]
+text = "玉ねぎ 飴色 炒める"
+path = "料理/カレー.md"
+heading = "コツ"
