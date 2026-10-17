@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use crate::cache::{EmbeddingCache, cache_path};
 use crate::config::{self, Registry, Vault};
 use crate::embed::OnnxEmbedder;
 use crate::embed::download::{DownloadEvent, ensure_model, with_model};
@@ -110,14 +111,15 @@ pub fn index(
     let _lock = acquire(vault, request.wait, on_event)?;
     let (embedder, fps) = load_model(vault, paths, on_event)?;
     let db = vault.db_path();
-    let mut store = if request.rebuild {
+    let cache_file = cache_path(&db);
+    let (mut store, mut cache) = if request.rebuild {
         let (store, moved) = Store::open_for_rebuild(&db)?;
         if let Some(moved) = &moved {
             on_event(Event::CorruptDbMoved(moved));
         }
-        store
+        (store, EmbeddingCache::open_for_rebuild(&cache_file)?)
     } else {
-        Store::open(&db)?
+        (Store::open(&db)?, EmbeddingCache::open(&cache_file)?)
     };
     let opts = IndexOptions {
         exclude: &vault.config.exclude,
@@ -125,9 +127,15 @@ pub fn index(
         budget: request.budget,
         rebuild: request.rebuild,
     };
-    indexer::index_vault(&vault.root, &mut store, &embedder, &fps, &opts, &mut |e| {
-        forward(e, on_event)
-    })
+    indexer::index_vault(
+        &vault.root,
+        &mut store,
+        &mut cache,
+        &embedder,
+        &fps,
+        &opts,
+        &mut |e| forward(e, on_event),
+    )
 }
 
 /// Loads the vault's model and computes its fingerprints while the model cache lock is held.

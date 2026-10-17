@@ -1,7 +1,10 @@
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
+use notrieve::Error;
+use notrieve::cache::EmbeddingCache;
+use notrieve::embed::Embedder;
 use notrieve::embed::fake::FakeEmbedder;
 use notrieve::fingerprint::Fingerprints;
 use notrieve::indexer::{IndexEvent, IndexOptions, IndexReport, index_vault};
@@ -42,6 +45,34 @@ impl Fixture {
         Store::open(&self.data.path().join("index.db")).unwrap()
     }
 
+    fn cache_path(&self) -> PathBuf {
+        self.data.path().join("index.embeddings.db")
+    }
+
+    fn cache(&self) -> EmbeddingCache {
+        EmbeddingCache::open(&self.cache_path()).unwrap()
+    }
+
+    /// Chunks whose embedding_key has no vector in the cache.
+    fn dangling_keys(&self, store: &Store) -> i64 {
+        let conn = store.conn();
+        conn.execute(
+            "ATTACH DATABASE ?1 AS cache",
+            [self.cache_path().to_str().unwrap()],
+        )
+        .unwrap();
+        let n = conn
+            .query_row(
+                "SELECT count(*) FROM chunks c LEFT JOIN cache.embeddings e
+                 ON e.key = c.embedding_key WHERE e.key IS NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        conn.execute("DETACH DATABASE cache", []).unwrap();
+        n
+    }
+
     fn run(
         &self,
         store: &mut Store,
@@ -58,7 +89,17 @@ impl Fixture {
             budget,
             rebuild,
         };
-        index_vault(self.vault.path(), store, e, fps, &opts, &mut |_| {}).unwrap()
+        let mut cache = self.cache();
+        index_vault(
+            self.vault.path(),
+            store,
+            &mut cache,
+            e,
+            fps,
+            &opts,
+            &mut |_| {},
+        )
+        .unwrap()
     }
 
     fn index_with(
@@ -321,22 +362,6 @@ fn fingerprint_change_rebuilds_everything() {
 }
 
 #[test]
-fn dimension_change_recreates_the_vector_table() {
-    let f = Fixture::new();
-    f.write("a.md", "alpha\n");
-    let mut s = f.store();
-    f.index_with(&mut s, &FakeEmbedder::new(8), "fp-a", &[], None);
-    f.index_with(&mut s, &FakeEmbedder::new(16), "fp-b", &[], None);
-    let len: i64 = s
-        .conn()
-        .query_row("SELECT vec_length(embedding) FROM chunks_vec", [], |r| {
-            r.get(0)
-        })
-        .unwrap();
-    assert_eq!(len, 16);
-}
-
-#[test]
 fn tags_aliases_and_line_numbers_are_stored() {
     let f = Fixture::new();
     f.write(
@@ -404,6 +429,7 @@ fn invalid_exclude_fails_before_a_fingerprint_rebuild_wipes_the_index() {
     let result = index_vault(
         f.vault.path(),
         &mut s,
+        &mut f.cache(),
         &e,
         &fps("model-a", "fp-b"),
         &opts,
@@ -431,6 +457,7 @@ fn malformed_gitignore_line_is_an_error_and_well_formed_one_is_complete() {
     let result = index_vault(
         f.vault.path(),
         &mut s,
+        &mut f.cache(),
         &e,
         &fps("model-a", "fp-a"),
         &opts,
@@ -481,6 +508,7 @@ fn malformed_parent_gitignore_is_an_error() {
     let result = index_vault(
         &vault,
         &mut s,
+        &mut EmbeddingCache::open(&data.path().join("index.embeddings.db")).unwrap(),
         &e,
         &fps("model-a", "fp-a"),
         &opts,
@@ -537,6 +565,7 @@ fn rebuilding_is_announced_before_any_file_starts() {
     index_vault(
         f.vault.path(),
         &mut s,
+        &mut f.cache(),
         &e,
         &fps("model-a", "fp-a"),
         &opts,
@@ -567,6 +596,7 @@ fn invalid_exclude_with_an_explicit_rebuild_keeps_the_index() {
     let result = index_vault(
         f.vault.path(),
         &mut s,
+        &mut f.cache(),
         &e,
         &fps("model-a", "fp-a"),
         &opts,
@@ -574,4 +604,362 @@ fn invalid_exclude_with_an_explicit_rebuild_keeps_the_index() {
     );
     assert!(result.is_err());
     assert_eq!(paths(&s), ["a.md"]);
+}
+
+/// Two sections long enough not to be merged (the fake embedder counts characters).
+const TWO_SECTIONS: &str = "# 医療費\n医療費控除の対象になる費用と領収書の保管方法をまとめておく。\n# 年金\n年金の受給額と手続きの時期を確認して、必要な書類をそろえる。\n";
+
+#[test]
+fn settings_change_rebuild_embeds_nothing_again() {
+    let f = Fixture::new();
+    f.write("a.md", TWO_SECTIONS);
+    f.write(
+        "b.md",
+        "# B\nbeta gamma delta epsilon zeta eta theta iota\n",
+    );
+    let (mut s, e) = (f.store(), FakeEmbedder::new(8));
+    f.run(&mut s, &e, &fps("model-a", "fp-a"), &[], None, false);
+    assert_eq!(s.stats().unwrap(), (2, 3));
+    let embedded = e.embedded_count();
+    let r = f.run(&mut s, &e, &fps("model-a", "fp-b"), &[], None, false);
+    assert_eq!(
+        (r.rebuild_reason, r.indexed),
+        (Some(RebuildReason::SettingsChanged), 2)
+    );
+    assert_eq!(e.embedded_count(), embedded);
+    assert_eq!(f.dangling_keys(&s), 0);
+}
+
+#[test]
+fn schema_change_rebuild_embeds_nothing_again() {
+    let f = Fixture::new();
+    f.write("a.md", TWO_SECTIONS);
+    let (mut s, e) = (f.store(), FakeEmbedder::new(8));
+    f.index(&mut s, &e);
+    s.conn()
+        .execute(
+            "UPDATE meta SET value = '1' WHERE key = 'schema_version'",
+            [],
+        )
+        .unwrap();
+    let embedded = e.embedded_count();
+    let r = f.index(&mut s, &e);
+    assert_eq!(
+        (r.rebuild_reason, r.indexed),
+        (Some(RebuildReason::SchemaChanged), 1)
+    );
+    assert_eq!(e.embedded_count(), embedded);
+}
+
+#[test]
+fn only_the_changed_chunk_is_embedded_again() {
+    let f = Fixture::new();
+    f.write("a.md", TWO_SECTIONS);
+    let (mut s, e) = (f.store(), FakeEmbedder::new(8));
+    f.index(&mut s, &e);
+    let before = e.embedded_count();
+    f.write("a.md", &TWO_SECTIONS.replace("必要な書類", "必要な証明書"));
+    let r = f.index(&mut s, &e);
+    assert_eq!(r.indexed, 1);
+    assert_eq!(e.embedded_count() - before, 1);
+}
+
+#[test]
+fn model_change_embeds_every_chunk_again() {
+    let f = Fixture::new();
+    f.write("a.md", TWO_SECTIONS);
+    f.write(
+        "b.md",
+        "# B\nbeta gamma delta epsilon zeta eta theta iota\n",
+    );
+    let (mut s, e) = (f.store(), FakeEmbedder::new(8));
+    f.index(&mut s, &e);
+    let before = e.embedded_count();
+    let r = f.run(&mut s, &e, &fps("model-b", "fp-b"), &[], None, false);
+    assert_eq!(r.rebuild_reason, Some(RebuildReason::ModelChanged));
+    assert_eq!(e.embedded_count() - before, 3);
+}
+
+#[test]
+fn unreferenced_vectors_are_removed_after_a_complete_run() {
+    let f = Fixture::new();
+    f.write("a.md", TWO_SECTIONS);
+    let (mut s, e) = (f.store(), FakeEmbedder::new(8));
+    f.index(&mut s, &e);
+    let old_keys = s.embedding_keys().unwrap();
+    f.write("a.md", &TWO_SECTIONS.replace("必要な書類", "必要な証明書"));
+    f.index(&mut s, &e);
+    assert_eq!(f.cache().entry_count().unwrap(), 2);
+    f.run(&mut s, &e, &fps("model-b", "fp-b"), &[], None, false);
+    let cache = f.cache();
+    assert_eq!(
+        cache.entry_count().unwrap(),
+        s.embedding_keys().unwrap().len()
+    );
+    for key in &old_keys {
+        assert!(!cache.contains(key).unwrap());
+    }
+}
+
+#[test]
+fn budget_stopped_rebuild_keeps_the_vectors_of_files_not_yet_reindexed() {
+    let f = Fixture::new();
+    f.write("a.md", "alpha\n");
+    f.write("b.md", "beta\n");
+    let (mut s, e) = (f.store(), FakeEmbedder::new(8));
+    f.index(&mut s, &e);
+    let stored = f.cache().entry_count().unwrap();
+    let r = f.run(
+        &mut s,
+        &e,
+        &fps("model-a", "fp-b"),
+        &[],
+        Some(Duration::ZERO),
+        false,
+    );
+    assert_eq!((r.rebuilt, r.indexed, r.remaining), (true, 0, 2));
+    assert_eq!(f.cache().entry_count().unwrap(), stored);
+    let embedded = e.embedded_count();
+    f.run(&mut s, &e, &fps("model-a", "fp-b"), &[], None, false);
+    assert_eq!(e.embedded_count(), embedded);
+}
+
+/// Returns one vector fewer than it is asked for.
+struct ShortEmbedder(FakeEmbedder);
+
+impl Embedder for ShortEmbedder {
+    fn model_id(&self) -> &str {
+        self.0.model_id()
+    }
+
+    fn dim(&self) -> usize {
+        self.0.dim()
+    }
+
+    fn embed_documents(&self, texts: &[String]) -> notrieve::Result<Vec<Vec<f32>>> {
+        let mut vectors = self.0.embed_documents(texts)?;
+        vectors.pop();
+        Ok(vectors)
+    }
+
+    fn embed_query(&self, text: &str) -> notrieve::Result<Vec<f32>> {
+        self.0.embed_query(text)
+    }
+
+    fn count_tokens(&self, text: &str) -> notrieve::Result<usize> {
+        self.0.count_tokens(text)
+    }
+}
+
+#[test]
+fn embedder_returning_too_few_vectors_skips_the_file_and_writes_no_index_rows() {
+    let f = Fixture::new();
+    f.write("a.md", TWO_SECTIONS);
+    let mut s = f.store();
+    let e = ShortEmbedder(FakeEmbedder::new(8));
+    let opts = IndexOptions {
+        exclude: &[],
+        chunk_max_tokens: 450,
+        budget: None,
+        rebuild: false,
+    };
+    let r = index_vault(
+        f.vault.path(),
+        &mut s,
+        &mut f.cache(),
+        &e,
+        &fps("model-a", "fp-a"),
+        &opts,
+        &mut |_| {},
+    )
+    .unwrap();
+    assert_eq!((r.indexed, r.skipped.len()), (0, 1));
+    assert!(
+        r.skipped[0].reason.contains("1 vectors for 2 texts"),
+        "{}",
+        r.skipped[0].reason
+    );
+    assert_eq!(s.stats().unwrap(), (0, 0));
+    assert_eq!(f.dangling_keys(&s), 0);
+}
+
+fn remove_cache_files(f: &Fixture) {
+    for suffix in ["", "-wal", "-shm"] {
+        let mut path = f.cache_path().into_os_string();
+        path.push(suffix);
+        let _ = fs::remove_file(path);
+    }
+}
+
+#[test]
+fn unreadable_cache_is_recreated_and_every_chunk_embedded_again() {
+    let f = Fixture::new();
+    f.write("a.md", TWO_SECTIONS);
+    let (mut s, e) = (f.store(), FakeEmbedder::new(8));
+    f.index(&mut s, &e);
+    remove_cache_files(&f);
+    fs::write(f.cache_path(), vec![b'x'; 4096]).unwrap();
+    let before = e.embedded_count();
+    let r = f.index(&mut s, &e);
+    assert_eq!(r.rebuild_reason, Some(RebuildReason::CacheReset));
+    assert_eq!(e.embedded_count() - before, 2);
+    assert_eq!(f.dangling_keys(&s), 0);
+}
+
+#[test]
+fn deleted_cache_is_recreated_and_every_chunk_embedded_again() {
+    let f = Fixture::new();
+    f.write("a.md", TWO_SECTIONS);
+    let (mut s, e) = (f.store(), FakeEmbedder::new(8));
+    f.index(&mut s, &e);
+    remove_cache_files(&f);
+    let before = e.embedded_count();
+    let r = f.index(&mut s, &e);
+    assert_eq!(r.rebuild_reason, Some(RebuildReason::CacheReset));
+    assert_eq!(e.embedded_count() - before, 2);
+    assert_eq!(f.dangling_keys(&s), 0);
+}
+
+#[test]
+fn failure_after_the_cache_write_leaves_no_dangling_key() {
+    let f = Fixture::new();
+    f.write("a.md", "alpha\n");
+    let (mut s, e) = (f.store(), FakeEmbedder::new(8));
+    f.index(&mut s, &e);
+    // index.db rejects the new chunk after its vector has been committed to the cache.
+    s.conn()
+        .execute_batch(
+            "CREATE TRIGGER reject BEFORE INSERT ON chunks WHEN NEW.body LIKE '%EXPLODE%'
+             BEGIN SELECT RAISE(ABORT, 'rejected'); END;",
+        )
+        .unwrap();
+    f.write("a.md", "alpha EXPLODE\n");
+    let opts = IndexOptions {
+        exclude: &[],
+        chunk_max_tokens: 450,
+        budget: None,
+        rebuild: false,
+    };
+    let err = index_vault(
+        f.vault.path(),
+        &mut s,
+        &mut f.cache(),
+        &e,
+        &fps("model-a", "fp-a"),
+        &opts,
+        &mut |_| {},
+    )
+    .unwrap_err();
+    assert!(matches!(err, Error::Sqlite(_)), "{err}");
+    assert_eq!(f.dangling_keys(&s), 0);
+    assert_eq!(f.cache().entry_count().unwrap(), 2);
+    s.conn().execute_batch("DROP TRIGGER reject;").unwrap();
+    let embedded = e.embedded_count();
+    f.index(&mut s, &e);
+    assert_eq!(e.embedded_count(), embedded);
+    assert_eq!(f.cache().entry_count().unwrap(), 1);
+}
+
+#[test]
+fn vectors_orphaned_by_a_failed_run_are_removed_even_when_nothing_is_reindexed() {
+    let f = Fixture::new();
+    f.write("a.md", "alpha\n");
+    let (mut s, e) = (f.store(), FakeEmbedder::new(8));
+    f.index(&mut s, &e);
+    s.conn()
+        .execute_batch(
+            "CREATE TRIGGER reject BEFORE INSERT ON chunks WHEN NEW.body LIKE '%EXPLODE%'
+             BEGIN SELECT RAISE(ABORT, 'rejected'); END;",
+        )
+        .unwrap();
+    f.write("a.md", "alpha EXPLODE\n");
+    let opts = IndexOptions {
+        exclude: &[],
+        chunk_max_tokens: 450,
+        budget: None,
+        rebuild: false,
+    };
+    let failed = index_vault(
+        f.vault.path(),
+        &mut s,
+        &mut f.cache(),
+        &e,
+        &fps("model-a", "fp-a"),
+        &opts,
+        &mut |_| {},
+    );
+    assert!(failed.is_err());
+    assert_eq!(f.cache().entry_count().unwrap(), 2);
+    // The note goes back to the indexed content, so the next run re-indexes nothing.
+    f.write("a.md", "alpha\n");
+    let r = f.index(&mut s, &e);
+    assert_eq!((r.indexed, r.rebuilt), (0, false));
+    assert_eq!(f.cache().entry_count().unwrap(), 1);
+    assert_eq!(f.dangling_keys(&s), 0);
+}
+
+#[test]
+fn cache_recreated_before_a_failed_run_is_still_rebuilt_by_the_next_run() {
+    let f = Fixture::new();
+    f.write("a.md", TWO_SECTIONS);
+    let (mut s, e) = (f.store(), FakeEmbedder::new(8));
+    f.index(&mut s, &e);
+    remove_cache_files(&f);
+    // This run creates the new cache, then fails on the exclude rule before it can rebuild.
+    let bad = vec!["[".to_string()];
+    let opts = IndexOptions {
+        exclude: &bad,
+        chunk_max_tokens: 450,
+        budget: None,
+        rebuild: false,
+    };
+    let failed = index_vault(
+        f.vault.path(),
+        &mut s,
+        &mut f.cache(),
+        &e,
+        &fps("model-a", "fp-a"),
+        &opts,
+        &mut |_| {},
+    );
+    assert!(failed.is_err());
+    assert!(f.cache_path().exists());
+    let before = e.embedded_count();
+    let r = f.index(&mut s, &e);
+    assert_eq!(r.rebuild_reason, Some(RebuildReason::CacheReset));
+    assert_eq!(e.embedded_count() - before, 2);
+    assert_eq!(f.dangling_keys(&s), 0);
+}
+
+#[test]
+fn dimension_change_stores_vectors_of_the_new_dimension() {
+    let f = Fixture::new();
+    f.write("a.md", "alpha\n");
+    let mut s = f.store();
+    f.run(
+        &mut s,
+        &FakeEmbedder::new(8),
+        &fps("model-a", "fp-a"),
+        &[],
+        None,
+        false,
+    );
+    f.run(
+        &mut s,
+        &FakeEmbedder::new(16),
+        &fps("model-b", "fp-b"),
+        &[],
+        None,
+        false,
+    );
+    let lengths: Vec<i64> = f
+        .cache()
+        .conn()
+        .prepare("SELECT length(vector) FROM embeddings")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(lengths, [64]);
 }

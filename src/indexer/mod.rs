@@ -3,6 +3,7 @@ pub mod scan;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use crate::cache::{EmbeddingCache, EmbeddingKey, embedding_key};
 use crate::embed::Embedder;
 use crate::fingerprint::Fingerprints;
 use crate::markdown::chunk::{MERGE_BELOW_TOKENS, chunk_note};
@@ -58,6 +59,7 @@ pub enum IndexEvent<'a> {
 pub fn index_vault<E: Embedder + ?Sized>(
     root: &Path,
     store: &mut Store,
+    cache: &mut EmbeddingCache,
     embedder: &E,
     fps: &Fingerprints,
     opts: &IndexOptions<'_>,
@@ -68,12 +70,17 @@ pub fn index_vault<E: Embedder + ?Sized>(
     // Scan first: invalid exclude or ignore rules must fail before anything is dropped.
     let scan = scan_vault(root, opts.exclude)?;
     let reason = match store.rebuild_reason(fps)? {
+        Some(reason @ (RebuildReason::NewIndex | RebuildReason::ModelChanged)) => Some(reason),
+        // Rows written against another cache point to vectors this one does not hold (spec §4.1).
+        // The id is persistent, so a run that fails before rebuilding is caught by the next one.
+        _ if store.cache_id()?.as_deref() != Some(cache.id()) => Some(RebuildReason::CacheReset),
         None if opts.rebuild => Some(RebuildReason::Requested),
         other => other,
     };
     if let Some(reason) = reason {
         on_event(IndexEvent::Rebuilding(reason));
         store.rebuild(fps, embedder.model_id(), embedder.dim())?;
+        store.bind_cache(cache.id())?;
         report.rebuilt = true;
         report.rebuild_reason = Some(reason);
     }
@@ -142,8 +149,9 @@ pub fn index_vault<E: Embedder + ?Sized>(
         }
         match index_file(
             store,
+            cache,
             embedder,
-            &fps.index,
+            fps,
             opts.chunk_max_tokens,
             entry,
             bytes,
@@ -175,13 +183,25 @@ pub fn index_vault<E: Embedder + ?Sized>(
             }
         }
     }
+    // Only after a complete run: a run stopped by the budget (or an incomplete scan) still needs
+    // the vectors of files it has not re-indexed yet.
+    if finished && report.remaining == 0 && scan.complete {
+        let changed = report.rebuilt || report.indexed > 0 || report.deleted > 0;
+        // The count check also collects entries left by an earlier run that failed after its
+        // cache write, without reading every key on each search.
+        if changed || cache.entry_count()? > store.distinct_key_count()? {
+            cache.retain(&store.embedding_keys()?)?;
+        }
+    }
     Ok(report)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn index_file<E: Embedder + ?Sized>(
     store: &mut Store,
+    cache: &mut EmbeddingCache,
     embedder: &E,
-    fingerprint: &str,
+    fps: &Fingerprints,
     chunk_max_tokens: usize,
     entry: &ScanEntry,
     bytes: Vec<u8>,
@@ -204,22 +224,43 @@ fn index_file<E: Embedder + ?Sized>(
         .iter()
         .map(|c| c.embedding_input(&note.meta.title))
         .collect();
-    let vectors = if inputs.is_empty() {
-        Vec::new()
-    } else {
-        embedder.embed_documents(&inputs)?
-    };
+    let keys: Vec<EmbeddingKey> = inputs
+        .iter()
+        .map(|input| embedding_key(&fps.model, input))
+        .collect();
+    let mut missing: Vec<usize> = Vec::new();
+    for (i, key) in keys.iter().enumerate() {
+        if !cache.contains(key)? && !missing.iter().any(|&j| keys[j] == *key) {
+            missing.push(i);
+        }
+    }
+    if !missing.is_empty() {
+        let texts: Vec<String> = missing.iter().map(|&i| inputs[i].clone()).collect();
+        let vectors = embedder.embed_documents(&texts)?;
+        // A short answer would leave chunks pointing to keys that were never stored (spec §4.1).
+        if vectors.len() != texts.len() {
+            return Err(Error::Embedding(format!(
+                "the model returned {} vectors for {} texts",
+                vectors.len(),
+                texts.len()
+            )));
+        }
+        let entries: Vec<(EmbeddingKey, Vec<f32>)> =
+            missing.iter().map(|&i| keys[i]).zip(vectors).collect();
+        // Committed before the index rows, so a failure below leaves only unreferenced entries.
+        cache.put(&entries)?;
+    }
     let records: Vec<ChunkRecord> = chunks
         .into_iter()
-        .zip(vectors)
+        .zip(keys)
         .enumerate()
-        .map(|(ord, (chunk, embedding))| ChunkRecord {
+        .map(|(ord, (chunk, embedding_key))| ChunkRecord {
             ord,
             heading_path: chunk.heading_path_text(),
             start_line: chunk.start_line,
             end_line: chunk.end_line,
             body: chunk.body,
-            embedding,
+            embedding_key,
         })
         .collect();
     let meta = note.meta;
@@ -233,5 +274,5 @@ fn index_file<E: Embedder + ?Sized>(
         tags: meta.tags,
         frontmatter: meta.frontmatter,
     };
-    store.write_file(fingerprint, &file, &records)
+    store.write_file(&fps.index, &file, &records)
 }

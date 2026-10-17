@@ -20,7 +20,7 @@ pub const DEFAULT_CONFIG_TOML: &str = "\
 model = \"ruri-v3-130m\"
 exclude = []
 ";
-pub const VAULT_GITIGNORE: &str = "index.db*\n*.lock\n";
+pub const VAULT_GITIGNORE: &str = "index.db*\n*.embeddings.db*\n*.lock\n";
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -123,6 +123,35 @@ mod tests {
             VaultConfig::parse("modle = \"x\""),
             Err(Error::Config(_))
         ));
+    }
+
+    #[test]
+    fn vault_gitignore_covers_the_index_the_cache_and_the_lock() {
+        use ignore::gitignore::GitignoreBuilder;
+        let dir = std::path::Path::new("/vault/.notrieve");
+        let mut builder = GitignoreBuilder::new(dir);
+        for line in VAULT_GITIGNORE.lines() {
+            builder.add_line(None, line).unwrap();
+        }
+        let gitignore = builder.build().unwrap();
+        for name in [
+            "index.db",
+            "index.db-wal",
+            "index.db.lock",
+            "index.embeddings.db",
+            "index.embeddings.db-shm",
+            "work.embeddings.db",
+        ] {
+            assert!(
+                gitignore.matched(dir.join(name), false).is_ignore(),
+                "{name}"
+            );
+        }
+        assert!(
+            !gitignore
+                .matched(dir.join("config.toml"), false)
+                .is_ignore()
+        );
     }
 
     #[test]
