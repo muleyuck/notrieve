@@ -235,6 +235,12 @@ fn compare_candidate_models() {
             "onnx/model.onnx",
             256,
         ),
+        (
+            "ruri-v3-30m-int8",
+            "sirasagi62/ruri-v3-30m-ONNX",
+            "onnx/model_int8.onnx",
+            256,
+        ),
     ];
     for (id, repo, onnx_file, dim) in candidates {
         let tmp = TempDir::new().unwrap();
