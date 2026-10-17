@@ -57,7 +57,21 @@ fn default_chunk_max_tokens() -> usize {
 
 impl VaultConfig {
     pub fn parse(text: &str) -> Result<Self> {
-        toml::from_str(text).map_err(|e| Error::Config(e.to_string()))
+        let config: Self = toml::from_str(text).map_err(|e| Error::Config(e.to_string()))?;
+        // Lowercased because macOS filesystems are case-insensitive; `contains` also covers the
+        // cache's SQLite sidecars (-wal, -shm, -journal), which cache recovery deletes.
+        let reserved = config.db_path.file_name().is_some_and(|name| {
+            name.to_string_lossy()
+                .to_ascii_lowercase()
+                .contains(".embeddings.db")
+        });
+        if reserved {
+            return Err(Error::Config(format!(
+                "db_path {}: a file name containing `.embeddings.db` is reserved for the embedding cache",
+                config.db_path.display()
+            )));
+        }
+        Ok(config)
     }
 }
 
@@ -118,6 +132,26 @@ mod tests {
     }
 
     #[test]
+    fn db_path_named_like_an_embedding_cache_is_rejected() {
+        for name in [
+            "work.db.embeddings.db",
+            "work.db.EMBEDDINGS.DB",
+            "work.db.embeddings.db-wal",
+            "work.db.embeddings.db-shm",
+        ] {
+            let err = VaultConfig::parse(&format!("db_path = \"/c/{name}\"")).unwrap_err();
+            assert!(
+                matches!(&err, Error::Config(m) if m.contains("db_path") && m.contains(".embeddings.db")),
+                "{name}: {err}"
+            );
+        }
+        for name in ["work.sqlite", "embeddings.sqlite"] {
+            let c = VaultConfig::parse(&format!("db_path = \"/c/{name}\"")).unwrap();
+            assert_eq!(c.db_path, PathBuf::from(format!("/c/{name}")));
+        }
+    }
+
+    #[test]
     fn unknown_key_is_rejected() {
         assert!(matches!(
             VaultConfig::parse("modle = \"x\""),
@@ -138,9 +172,10 @@ mod tests {
             "index.db",
             "index.db-wal",
             "index.db.lock",
-            "index.embeddings.db",
-            "index.embeddings.db-shm",
-            "work.embeddings.db",
+            "index.db.embeddings.db",
+            "index.db.embeddings.db-wal",
+            "index.db.embeddings.db-shm",
+            "work.sqlite.embeddings.db",
         ] {
             assert!(
                 gitignore.matched(dir.join(name), false).is_ignore(),

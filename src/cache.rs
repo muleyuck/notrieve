@@ -24,12 +24,13 @@ pub fn embedding_key(model_fingerprint: &str, input: &str) -> EmbeddingKey {
     *hasher.finalize().as_bytes()
 }
 
-/// `<dir>/<index file stem>.embeddings.db`. Naming it after the index keeps vaults whose
-/// `db_path` share a directory from sharing (and garbage-collecting) one cache.
+/// `<dir>/<index file name>.embeddings.db`. Naming it after the full index file name (extension
+/// included) keeps vaults whose `db_path` share a directory, even ones differing only in
+/// extension, from sharing (and garbage-collecting) one cache.
 pub fn cache_path(db_path: &Path) -> PathBuf {
     let mut name = db_path
-        .file_stem()
-        .map_or_else(|| "index".into(), |stem| stem.to_os_string());
+        .file_name()
+        .map_or_else(|| "index".into(), |name| name.to_os_string());
     name.push(".embeddings.db");
     db_path.with_file_name(name)
 }
@@ -215,13 +216,25 @@ mod tests {
 
     #[test]
     fn cache_file_is_named_after_the_index_file() {
-        assert_eq!(
-            cache_path(Path::new("/v/.notrieve/index.db")),
-            PathBuf::from("/v/.notrieve/index.embeddings.db")
+        assert_ne!(
+            cache_path(Path::new("/c/work.db")),
+            cache_path(Path::new("/c/work.sqlite"))
+        );
+        assert_ne!(
+            cache_path(Path::new("/c/work")),
+            cache_path(Path::new("/c/work.db"))
         );
         assert_eq!(
-            cache_path(Path::new("/cache/work.db")),
-            PathBuf::from("/cache/work.embeddings.db")
+            cache_path(Path::new("/v/.notrieve/index.db")),
+            PathBuf::from("/v/.notrieve/index.db.embeddings.db")
+        );
+        assert_eq!(
+            cache_path(Path::new("/c/work.sqlite")),
+            PathBuf::from("/c/work.sqlite.embeddings.db")
+        );
+        assert_eq!(
+            cache_path(Path::new("/c/work")),
+            PathBuf::from("/c/work.embeddings.db")
         );
         assert_ne!(
             cache_path(Path::new("/cache/work.db")),
@@ -232,7 +245,7 @@ mod tests {
     #[test]
     fn cache_id_survives_a_reopen_and_changes_when_the_cache_is_recreated() {
         let dir = TempDir::new().unwrap();
-        let path = dir.path().join("index.embeddings.db");
+        let path = cache_path(&dir.path().join("index.db"));
         let first = EmbeddingCache::open(&path).unwrap().id().to_string();
         assert_eq!(EmbeddingCache::open(&path).unwrap().id(), first);
         std::fs::write(&path, vec![b'x'; 4096]).unwrap();
@@ -244,7 +257,7 @@ mod tests {
     #[test]
     fn first_open_creates_the_cache_and_a_reopen_does_not() {
         let dir = TempDir::new().unwrap();
-        let path = dir.path().join("index.embeddings.db");
+        let path = cache_path(&dir.path().join("index.db"));
         assert!(EmbeddingCache::open(&path).unwrap().is_new());
         assert!(!EmbeddingCache::open(&path).unwrap().is_new());
     }
@@ -252,7 +265,7 @@ mod tests {
     #[test]
     fn stored_vectors_are_little_endian_f32_and_survive_a_reopen() {
         let dir = TempDir::new().unwrap();
-        let path = dir.path().join("index.embeddings.db");
+        let path = cache_path(&dir.path().join("index.db"));
         let mut cache = EmbeddingCache::open(&path).unwrap();
         cache.put(&[(key(7), vec![1.5, -2.0])]).unwrap();
         drop(cache);
@@ -287,7 +300,7 @@ mod tests {
     #[test]
     fn unreadable_file_is_discarded_and_recreated() {
         let dir = TempDir::new().unwrap();
-        let path = dir.path().join("index.embeddings.db");
+        let path = cache_path(&dir.path().join("index.db"));
         std::fs::write(&path, vec![b'x'; 4096]).unwrap();
         let cache = EmbeddingCache::open(&path).unwrap();
         assert!(cache.is_new());
@@ -297,7 +310,7 @@ mod tests {
     #[test]
     fn cache_of_another_schema_version_is_discarded() {
         let dir = TempDir::new().unwrap();
-        let path = dir.path().join("index.embeddings.db");
+        let path = cache_path(&dir.path().join("index.db"));
         let mut cache = EmbeddingCache::open(&path).unwrap();
         cache.put(&[(key(1), vec![0.1])]).unwrap();
         cache
@@ -313,7 +326,7 @@ mod tests {
     #[test]
     fn damaged_pages_pass_a_normal_open_but_are_discarded_on_rebuild() {
         let dir = TempDir::new().unwrap();
-        let path = dir.path().join("index.embeddings.db");
+        let path = cache_path(&dir.path().join("index.db"));
         {
             let mut cache = EmbeddingCache::open(&path).unwrap();
             let entries: Vec<(EmbeddingKey, Vec<f32>)> = (0..300u32)

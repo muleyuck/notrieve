@@ -46,7 +46,7 @@ impl Fixture {
     }
 
     fn cache_path(&self) -> PathBuf {
-        self.data.path().join("index.embeddings.db")
+        notrieve::cache::cache_path(&self.data.path().join("index.db"))
     }
 
     fn cache(&self) -> EmbeddingCache {
@@ -513,7 +513,8 @@ fn malformed_parent_gitignore_is_an_error() {
     let result = index_vault(
         &vault,
         &mut s,
-        &mut EmbeddingCache::open(&data.path().join("index.embeddings.db")).unwrap(),
+        &mut EmbeddingCache::open(&notrieve::cache::cache_path(&data.path().join("index.db")))
+            .unwrap(),
         &e,
         &fps("model-a", "fp-a"),
         &opts,
