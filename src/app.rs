@@ -3,12 +3,14 @@ use std::time::Duration;
 
 use crate::cache::{EmbeddingCache, cache_path};
 use crate::config::{self, Registry, Vault};
-use crate::embed::OnnxEmbedder;
 use crate::embed::download::{DownloadEvent, ensure_model, with_model};
 use crate::embed::onnx::resolve_threads;
+use crate::embed::{Embedder, OnnxEmbedder};
 use crate::fingerprint::{Fingerprints, fingerprints};
+use crate::indexer::scan::{plan_changes, scan_vault};
 use crate::indexer::{self, IndexEvent, IndexOptions, IndexReport, Progress};
 use crate::lock;
+use crate::search::{self, IndexState, SearchQuery, SearchResponse};
 use crate::store::{RebuildReason, Store};
 use crate::{Error, Result};
 
@@ -136,6 +138,70 @@ pub fn index(
         &opts,
         &mut |e| forward(e, on_event),
     )
+}
+
+/// `notrieve search` (spec §5.3). The query is checked before the model is loaded.
+pub fn search(
+    vault: &Vault,
+    paths: &Paths,
+    query: &SearchQuery,
+    on_event: &mut dyn FnMut(Event<'_>),
+) -> Result<SearchResponse> {
+    query.validate()?;
+    let (embedder, fps) = load_model(vault, paths, on_event)?;
+    search_vault(vault, &embedder, &fps, query, on_event)
+}
+
+/// Updates within `search_budget_ms` when no other process holds the lock, then light-scans and
+/// searches (spec §5.3).
+pub fn search_vault<E: Embedder + ?Sized>(
+    vault: &Vault,
+    embedder: &E,
+    fps: &Fingerprints,
+    query: &SearchQuery,
+    on_event: &mut dyn FnMut(Event<'_>),
+) -> Result<SearchResponse> {
+    query.validate()?;
+    let db = vault.db_path();
+    if let Some(_lock) = lock::try_lock(&vault.lock_path())? {
+        let mut store = Store::open(&db)?;
+        let mut cache = EmbeddingCache::open(&cache_path(&db))?;
+        let opts = IndexOptions {
+            exclude: &vault.config.exclude,
+            chunk_max_tokens: vault.config.chunk_max_tokens,
+            budget: Some(Duration::from_millis(vault.config.search_budget_ms)),
+            rebuild: false,
+        };
+        indexer::index_vault(
+            &vault.root,
+            &mut store,
+            &mut cache,
+            embedder,
+            fps,
+            &opts,
+            &mut |e| forward(e, on_event),
+        )?;
+    }
+    let reader = search::open_reader(&db)?;
+    let scan = scan_vault(&vault.root, &vault.config.exclude)?;
+    let stale_files = plan_changes(&scan, &reader.file_states()?).stale_files();
+    // Our own lock was released above, so a held lock belongs to another process (spec §4.5).
+    let index_state = if !scan.complete {
+        IndexState::ScanError
+    } else if lock::try_lock(&vault.lock_path())?.is_none() {
+        IndexState::UpdatingElsewhere
+    } else if stale_files == 0 {
+        IndexState::Fresh
+    } else {
+        IndexState::IdleStale
+    };
+    let results = search::search(&reader, embedder, &fps.index, query)?;
+    Ok(SearchResponse {
+        results,
+        stale_files,
+        index_state,
+        indexer_error: None,
+    })
 }
 
 /// Loads the vault's model and computes its fingerprints while the model cache lock is held.

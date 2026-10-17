@@ -207,3 +207,35 @@ fn init_with_a_taken_name_fails_before_creating_files() {
     assert_eq!(out.status.code(), Some(1));
     assert!(!second.join(".notrieve").exists());
 }
+
+#[test]
+fn search_outside_any_vault_exits_with_code_2() {
+    let env = Env::new();
+    let out = env.run(&env.dir("elsewhere"), &["search", "税金"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(stderr(&out).contains("notrieve init"), "{}", stderr(&out));
+}
+
+#[test]
+fn search_k_outside_1_to_50_is_a_usage_error() {
+    let env = Env::new();
+    for k in ["0", "51"] {
+        let out = env.run(env.home.path(), &["search", "税金", "-k", k]);
+        assert_eq!(out.status.code(), Some(1), "{k}");
+        assert!(stderr(&out).contains("-k"), "{}", stderr(&out));
+    }
+}
+
+#[test]
+fn blank_search_query_fails_before_the_model_is_downloaded() {
+    let env = Env::new();
+    let notes = env.vault("notes");
+    let out = env.run(&notes, &["search", "  "]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        stderr(&out).contains("the query is empty"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(!env.home.path().join("cache/notrieve").exists());
+}

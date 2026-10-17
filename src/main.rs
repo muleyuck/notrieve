@@ -6,6 +6,7 @@ use clap::{Parser, Subcommand};
 use notrieve::app::{self, Event, IndexRequest, Paths};
 use notrieve::embed::download::DownloadEvent;
 use notrieve::indexer::IndexReport;
+use notrieve::search::{DEFAULT_K, MAX_K, SearchQuery, SearchResponse};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
@@ -41,6 +42,25 @@ enum Command {
         /// Exit with code 3 instead of waiting when another process holds the lock
         #[arg(long)]
         no_wait: bool,
+    },
+    /// Search the vault (changed notes are indexed first, within search_budget_ms)
+    Search {
+        query: String,
+        /// Registered vault to use (default: the vault containing the current directory, then the default vault)
+        #[arg(long)]
+        vault: Option<String>,
+        /// Number of results (1-50)
+        #[arg(short, default_value_t = DEFAULT_K as u8, value_parser = clap::value_parser!(u8).range(1..=MAX_K as i64))]
+        k: u8,
+        /// Only notes with this tag or one of its child tags; repeat to require several
+        #[arg(long = "tag")]
+        tags: Vec<String>,
+        /// Only notes whose vault-relative path starts with this
+        #[arg(long)]
+        path: Option<String>,
+        /// Print the results as JSON
+        #[arg(long)]
+        json: bool,
     },
     /// Manage the embedding model
     Model {
@@ -156,6 +176,32 @@ fn run(cli: Cli) -> Result<()> {
             };
             print_report(&app::index(&vault, &paths, &request, &mut print_event)?);
         }
+        Command::Search {
+            query,
+            vault,
+            k,
+            tags,
+            path,
+            json,
+        } => {
+            let vault = app::open_vault(vault.as_deref(), &cwd, &paths)?;
+            let query = SearchQuery {
+                text: query,
+                k: k as usize,
+                tags,
+                path_prefix: path,
+            };
+            let response = app::search(&vault, &paths, &query, &mut print_event)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&response)?);
+            } else {
+                print_results(&response);
+            }
+            // On stderr in both formats, so stdout stays the results alone (spec §5.3).
+            if let Some(notice) = stale_notice(&response) {
+                eprintln!("{notice}");
+            }
+        }
         Command::Model {
             command: ModelCommand::Pull { vault, force },
         } => {
@@ -238,5 +284,71 @@ fn print_report(report: &IndexReport) {
     }
     if !report.scan_complete {
         println!("warning: some directories could not be read; deletions were not applied");
+    }
+}
+
+const BODY_PREVIEW_LINES: usize = 3;
+
+fn print_results(response: &SearchResponse) {
+    if response.results.is_empty() {
+        println!("no results");
+    }
+    for (i, hit) in response.results.iter().enumerate() {
+        let place = if hit.heading_path.is_empty() {
+            hit.title.clone()
+        } else {
+            format!("{} > {}", hit.title, hit.heading_path)
+        };
+        println!(
+            "{}. {}:{}-{}  {place}",
+            i + 1,
+            hit.path,
+            hit.start_line,
+            hit.end_line
+        );
+        for line in hit.body.lines().take(BODY_PREVIEW_LINES) {
+            println!("   {line}");
+        }
+    }
+}
+
+fn stale_notice(response: &SearchResponse) -> Option<String> {
+    (response.stale_files > 0).then(|| {
+        format!(
+            "{} file(s) changed since the last index ({}); run `notrieve index` to bring it up to date",
+            response.stale_files,
+            response.index_state.label()
+        )
+    })
+}
+
+#[cfg(test)]
+mod search_output_tests {
+    use super::*;
+    use notrieve::search::IndexState;
+
+    fn response(stale_files: usize, index_state: IndexState) -> SearchResponse {
+        SearchResponse {
+            results: Vec::new(),
+            stale_files,
+            index_state,
+            indexer_error: None,
+        }
+    }
+
+    #[test]
+    fn stale_notice_names_the_count_the_state_and_the_index_command() {
+        let notice = stale_notice(&response(3, IndexState::IdleStale)).unwrap();
+        assert!(notice.starts_with("3 file(s) changed"), "{notice}");
+        assert!(notice.contains("idle_stale"), "{notice}");
+        assert!(notice.contains("notrieve index"), "{notice}");
+    }
+
+    #[test]
+    fn nothing_stale_gives_no_notice() {
+        assert_eq!(
+            stale_notice(&response(0, IndexState::UpdatingElsewhere)),
+            None
+        );
     }
 }

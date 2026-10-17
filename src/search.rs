@@ -68,6 +68,40 @@ pub struct Hit {
     pub tags: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IndexState {
+    Fresh,
+    /// This process's own background indexer is running (MCP).
+    Updating,
+    UpdatingElsewhere,
+    IdleStale,
+    ScanError,
+}
+
+impl IndexState {
+    pub fn label(self) -> &'static str {
+        match self {
+            IndexState::Fresh => "fresh",
+            IndexState::Updating => "updating",
+            IndexState::UpdatingElsewhere => "updating_elsewhere",
+            IndexState::IdleStale => "idle_stale",
+            IndexState::ScanError => "scan_error",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct SearchResponse {
+    pub results: Vec<Hit>,
+    /// Changes found by the light scan just before the search (spec §4.2).
+    pub stale_files: usize,
+    pub index_state: IndexState,
+    /// The last failure of a background indexer (MCP).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub indexer_error: Option<String>,
+}
+
 /// Opens the index for searching, with its embedding cache attached as `cache`.
 pub fn open_reader(db_path: &Path) -> Result<Store> {
     let cache = cache_path(db_path);
@@ -325,6 +359,56 @@ fn load_hit(conn: &Connection, fused: &Fused) -> Result<Hit> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn response_serializes_the_spec_field_names() {
+        let hit = Hit {
+            path: "a.md".into(),
+            title: "a".into(),
+            heading_path: "".into(),
+            start_line: 1,
+            end_line: 2,
+            body: "alpha".into(),
+            score: 0.5,
+            fts_rank: None,
+            vec_rank: Some(1),
+            tags: vec!["work".into()],
+        };
+        let response = SearchResponse {
+            results: vec![hit],
+            stale_files: 3,
+            index_state: IndexState::UpdatingElsewhere,
+            indexer_error: None,
+        };
+        let v = serde_json::to_value(&response).unwrap();
+        assert_eq!(v["index_state"], "updating_elsewhere");
+        assert_eq!(v["stale_files"], 3);
+        assert!(v.get("indexer_error").is_none());
+        let first = &v["results"][0];
+        for key in [
+            "path",
+            "title",
+            "heading_path",
+            "start_line",
+            "end_line",
+            "body",
+            "score",
+            "fts_rank",
+            "vec_rank",
+            "tags",
+        ] {
+            assert!(first.get(key).is_some(), "{key}");
+        }
+        assert!(first["fts_rank"].is_null());
+        let failed = SearchResponse {
+            indexer_error: Some("boom".into()),
+            ..response
+        };
+        assert_eq!(
+            serde_json::to_value(&failed).unwrap()["indexer_error"],
+            "boom"
+        );
+    }
 
     #[test]
     fn rrf_sums_both_rankings_and_breaks_ties_by_chunk_id() {

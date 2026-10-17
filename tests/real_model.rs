@@ -202,3 +202,36 @@ fn cli_init_then_index_prints_counts_and_exits_zero() {
         String::from_utf8_lossy(&again.stdout)
     );
 }
+
+#[test]
+fn cli_search_json_finds_the_note_and_reports_a_fresh_index() {
+    if !enabled() {
+        eprintln!("skipped: set NOTRIEVE_TEST_MODEL=1");
+        return;
+    }
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("notes");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("税金.md"), "# 医療費控除\n領収書を集める。\n").unwrap();
+    std::fs::write(root.join("旅行.md"), "# 京都\n紅葉の季節に嵐山を歩いた。\n").unwrap();
+    let run = |args: &[&str]| {
+        std::process::Command::new(env!("CARGO_BIN_EXE_notrieve"))
+            .args(args)
+            .current_dir(&root)
+            .env("XDG_CONFIG_HOME", tmp.path().join("config"))
+            .output()
+            .unwrap()
+    };
+    assert_eq!(run(&["init"]).status.code(), Some(0));
+    let out = run(&["search", "医療費の控除", "--json"]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["index_state"], "fresh");
+    assert_eq!(v["stale_files"], 0);
+    assert_eq!(v["results"][0]["path"], "税金.md");
+}
