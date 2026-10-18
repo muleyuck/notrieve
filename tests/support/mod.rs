@@ -2,6 +2,7 @@
 #![allow(dead_code)]
 pub mod fake_api;
 
+use std::collections::VecDeque;
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
@@ -19,6 +20,7 @@ use notrieve::fingerprint::{Fingerprints, remote_fingerprints};
 use notrieve::indexer::{IndexOptions, index_vault};
 use notrieve::lock;
 use notrieve::store::Store;
+use notrieve::{Error, RemoteErrorKind};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
@@ -330,5 +332,63 @@ pub fn remote_fps(vault: &Vault) -> Fingerprints {
             remote_fingerprints(&contract, vault.config.chunk_max_tokens())
         }
         other => panic!("expected a remote model: {other:?}"),
+    }
+}
+
+/// `FakeEmbedder` whose `embed_documents` fails with the next scripted remote error, then works.
+pub struct FlakyRemote {
+    inner: FakeEmbedder,
+    script: Mutex<VecDeque<RemoteErrorKind>>,
+    calls: Mutex<Vec<Instant>>,
+}
+
+impl FlakyRemote {
+    pub fn new(failures: &[RemoteErrorKind]) -> Self {
+        Self {
+            inner: FakeEmbedder::new(16),
+            script: Mutex::new(failures.iter().copied().collect()),
+            calls: Mutex::new(Vec::new()),
+        }
+    }
+
+    pub fn calls(&self) -> usize {
+        lock_unpoisoned(&self.calls).len()
+    }
+
+    /// The time between consecutive calls, so waits are checked from a record, not by polling.
+    pub fn gaps(&self) -> Vec<Duration> {
+        lock_unpoisoned(&self.calls)
+            .windows(2)
+            .map(|w| w[1] - w[0])
+            .collect()
+    }
+
+    pub fn push(&self, kind: RemoteErrorKind) {
+        lock_unpoisoned(&self.script).push_back(kind);
+    }
+}
+
+impl Embedder for FlakyRemote {
+    fn model_id(&self) -> &str {
+        self.inner.model_id()
+    }
+    fn dim(&self) -> usize {
+        self.inner.dim()
+    }
+    fn embed_documents(&self, texts: &[String]) -> notrieve::Result<Vec<Vec<f32>>> {
+        lock_unpoisoned(&self.calls).push(Instant::now());
+        if let Some(kind) = lock_unpoisoned(&self.script).pop_front() {
+            return Err(Error::Remote {
+                kind,
+                message: format!("scripted {kind:?}"),
+            });
+        }
+        self.inner.embed_documents(texts)
+    }
+    fn embed_query(&self, text: &str) -> notrieve::Result<Vec<f32>> {
+        self.inner.embed_query(text)
+    }
+    fn count_tokens(&self, text: &str) -> notrieve::Result<usize> {
+        self.inner.count_tokens(text)
     }
 }

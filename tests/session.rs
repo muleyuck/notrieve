@@ -2,15 +2,15 @@ mod support;
 
 use std::sync::Arc;
 
-use notrieve::Error;
 use notrieve::cache::cache_path;
 use notrieve::embed::fake::FakeEmbedder;
 use notrieve::lock;
 use notrieve::search::{IndexState, SearchQuery};
 use notrieve::session::Session;
+use notrieve::{Error, RemoteErrorKind};
 use support::{
-    GateEmbedder, PanicEmbedder, fps, index_as_another_process, index_with, indexed_paths, vault,
-    wait_for, write,
+    FlakyRemote, GateEmbedder, PanicEmbedder, fps, index_as_another_process, index_with,
+    indexed_paths, vault, wait_for, write,
 };
 
 fn q(text: &str) -> SearchQuery {
@@ -726,4 +726,22 @@ fn a_rebuild_that_starts_and_finishes_during_a_search_is_reported_as_rebuilding(
     }));
     let err = session.search(&q("alpha")).unwrap_err();
     assert!(matches!(err, Error::Rebuilding { .. }), "{err}");
+}
+
+#[test]
+fn a_halted_updater_still_lets_search_use_the_index() {
+    let (_tmp, vault) = vault();
+    write(&vault, "a.md", "# A\nalpha\n");
+    index_as_another_process(&vault, &fps("a"));
+    let e = Arc::new(FlakyRemote::new(&[RemoteErrorKind::Auth]));
+    let session = Session::with_embedder(vault.clone(), e, fps("a")).unwrap();
+    write(&vault, "b.md", "# B\nbeta\n");
+    let r = wait_for(|| {
+        session.search(&q("alpha")).ok().filter(|r| {
+            r.indexer_error
+                .as_deref()
+                .is_some_and(|m| m.contains("restart"))
+        })
+    });
+    assert_eq!(r.results[0].path, "a.md");
 }

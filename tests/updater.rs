@@ -1,14 +1,16 @@
 mod support;
 
 use std::sync::Arc;
+use std::time::Duration;
 
+use notrieve::RemoteErrorKind;
 use notrieve::embed::fake::FakeEmbedder;
-use notrieve::indexer::updater::Updater;
+use notrieve::indexer::updater::{Backoff, Updater};
 use notrieve::lock;
 use notrieve::store::Store;
 use support::{
-    GateEmbedder, PanicEmbedder, fps, index_as_another_process, indexed_paths, vault, wait_for,
-    write,
+    FlakyRemote, GateEmbedder, PanicEmbedder, fps, index_as_another_process, indexed_paths, vault,
+    wait_for, write,
 };
 
 fn fake() -> Arc<FakeEmbedder> {
@@ -321,4 +323,86 @@ fn a_request_during_a_run_coalesces_into_one_more_run() {
     wait_for(|| Some(indexed_paths(&vault)).filter(|p| p.contains(&"late.md".to_string())));
     wait_for(|| Some(updater.status()).filter(|s| s.synced && !s.running));
     assert_eq!(indexed_paths(&vault), ["a.md", "late.md"]);
+}
+
+fn backoff(first_ms: u64, max_ms: u64) -> Backoff {
+    Backoff {
+        first: Duration::from_millis(first_ms),
+        max: Duration::from_millis(max_ms),
+    }
+}
+
+#[test]
+fn an_unavailable_api_pauses_the_updater_until_the_delay_ends() {
+    let (_tmp, vault) = vault();
+    write(&vault, "a.md", "# A\nalpha\n");
+    let e = Arc::new(FlakyRemote::new(&[RemoteErrorKind::Transient]));
+    let updater = Updater::start_with_backoff(
+        vault.clone(),
+        e.clone(),
+        fps("a"),
+        false,
+        backoff(1000, 5000),
+    )
+    .unwrap();
+    updater.request();
+    let paused =
+        wait_for(|| Some(updater.status()).filter(|s| s.retry_delay.is_some() && !s.running));
+    assert_eq!(paused.retry_delay, Some(Duration::from_millis(1000)));
+    assert!(paused.last_error.unwrap().contains("paused"));
+    updater.request();
+    wait_for(|| {
+        Some(updater.status()).filter(|s| e.calls() == 2 && !s.running && s.last_error.is_none())
+    });
+    assert!(e.gaps()[0] >= Duration::from_millis(1000), "{:?}", e.gaps());
+    assert_eq!(indexed_paths(&vault), ["a.md"]);
+}
+
+#[test]
+fn a_success_resets_the_retry_delay() {
+    let (_tmp, vault) = vault();
+    write(&vault, "a.md", "# A\nalpha\n");
+    use RemoteErrorKind::Transient;
+    let e = Arc::new(FlakyRemote::new(&[Transient, Transient]));
+    let updater = Updater::start_with_backoff(
+        vault.clone(),
+        e.clone(),
+        fps("a"),
+        false,
+        backoff(300, 5000),
+    )
+    .unwrap();
+    updater.request();
+    // The second failure doubles the first wait: 300 ms, then 600 ms.
+    wait_for(|| {
+        Some(updater.status()).filter(|s| {
+            e.calls() == 2 && !s.running && s.retry_delay == Some(Duration::from_millis(600))
+        })
+    });
+    wait_for(|| {
+        Some(updater.status()).filter(|s| e.calls() == 3 && s.retry_delay.is_none() && !s.running)
+    });
+    write(&vault, "b.md", "# B\nbeta\n");
+    e.push(Transient);
+    updater.request();
+    let paused = wait_for(|| {
+        Some(updater.status()).filter(|s| e.calls() == 4 && !s.running && s.retry_delay.is_some())
+    });
+    // The wait after the success starts again at 300 ms; without the reset it would continue from 600 to 1200.
+    assert_eq!(paused.retry_delay, Some(Duration::from_millis(300)));
+}
+
+#[test]
+fn an_auth_error_halts_the_updater_until_restart() {
+    let (_tmp, vault) = vault();
+    write(&vault, "a.md", "# A\nalpha\n");
+    let e = Arc::new(FlakyRemote::new(&[RemoteErrorKind::Auth]));
+    let updater = Updater::start(vault.clone(), e.clone(), fps("a"), false).unwrap();
+    updater.request();
+    let halted = wait_for(|| Some(updater.status()).filter(|s| s.halted));
+    assert!(halted.last_error.unwrap().contains("restart"));
+    write(&vault, "b.md", "# B\nbeta\n");
+    updater.request();
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(e.calls(), 1);
 }
