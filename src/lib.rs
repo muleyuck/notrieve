@@ -9,6 +9,7 @@ pub mod lock;
 pub mod markdown;
 pub mod note;
 pub mod search;
+pub mod session;
 pub mod store;
 
 pub use error::{Error, Result};

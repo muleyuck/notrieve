@@ -403,6 +403,17 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    pub fn has_file(&self, path: &str) -> Result<bool> {
+        if !self.has_table("files")? {
+            return Ok(false);
+        }
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM files WHERE path = ?1)",
+            [path],
+            |r| r.get(0),
+        )?)
+    }
+
     pub fn file_states(&self) -> Result<HashMap<String, FileState>> {
         if !self.has_table("files")? {
             return Ok(HashMap::new());

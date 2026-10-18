@@ -96,6 +96,12 @@ impl Updater {
         self.shared.wake.notify_one();
     }
 
+    /// Records that a search found the index matching this process's settings, so a later
+    /// mismatch is another process's change and needs a restart.
+    pub fn mark_synced(&self) {
+        self.shared.lock().status.synced = true;
+    }
+
     pub fn status(&self) -> UpdaterStatus {
         self.shared.lock().status.clone()
     }
