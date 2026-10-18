@@ -200,7 +200,11 @@ fn run(cli: Cli) -> Result<()> {
                 tags,
                 path_prefix: path,
             };
-            let response = app::search(&vault, &paths, &query, &mut print_event)?;
+            let response = app::search(&vault, &paths, &query, &mut |event| {
+                if !matches!(event, Event::SendingToRemote(_)) {
+                    print_event(event)
+                }
+            })?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&response)?);
             } else {
@@ -295,10 +299,20 @@ fn print_event(event: Event<'_>) {
         Event::Download(DownloadEvent::Finished { .. }) => {}
         Event::Rebuilding(reason) => eprintln!("{reason}"),
         Event::Indexing(p) => eprintln!("[{}/{}] {}", p.done + 1, p.total, p.path),
+        Event::SendingToRemote(host) => eprintln!("sending note text to {host} for embedding"),
         Event::CorruptDbMoved(path) => {
             eprintln!("moved the unreadable database to {}", path.display())
         }
     }
+}
+
+fn stopped_notice(report: &IndexReport) -> Option<String> {
+    report.interrupted.as_ref().map(|reason| {
+        format!(
+            "stopped: {reason}; {} file(s) left for the next run",
+            report.remaining
+        )
+    })
 }
 
 fn print_report(report: &IndexReport) {
@@ -313,7 +327,9 @@ fn print_report(report: &IndexReport) {
     for skipped in &report.skipped {
         println!("skipped {}: {}", skipped.path, skipped.reason);
     }
-    if report.remaining > 0 {
+    if let Some(notice) = stopped_notice(report) {
+        eprintln!("{notice}");
+    } else if report.remaining > 0 {
         println!("{} file(s) left for the next run", report.remaining);
     }
     if !report.scan_complete {
@@ -360,6 +376,22 @@ fn stale_notice(response: &SearchResponse) -> Option<String> {
 mod search_output_tests {
     use super::*;
     use notrieve::search::IndexState;
+
+    #[test]
+    fn stopped_notice_names_the_reason_and_the_files_left() {
+        let report = IndexReport {
+            remaining: 4,
+            interrupted: Some("HTTP 503 from https://api.example.com/v1/embeddings".into()),
+            ..IndexReport::default()
+        };
+        assert_eq!(
+            stopped_notice(&report).as_deref(),
+            Some(
+                "stopped: HTTP 503 from https://api.example.com/v1/embeddings; 4 file(s) left for the next run"
+            )
+        );
+        assert_eq!(stopped_notice(&IndexReport::default()), None);
+    }
 
     fn response(stale_files: usize, index_state: IndexState) -> SearchResponse {
         SearchResponse {

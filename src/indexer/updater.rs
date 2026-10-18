@@ -205,6 +205,7 @@ fn run_once(
         exclude: &vault.config.exclude,
         chunk_max_tokens: vault.config.chunk_max_tokens(),
         budget: None,
+        deadline: None,
         rebuild: false,
     };
     let report = indexer::index_vault(
@@ -222,6 +223,8 @@ fn run_once(
                     state.status.rebuild_generation += 1;
                 }
                 IndexEvent::File(p) => state.status.remaining = Some(p.total - p.done),
+                // The MCP process has no terminal to show it on.
+                IndexEvent::SendingToRemote { .. } => {}
             }
         },
     )?;

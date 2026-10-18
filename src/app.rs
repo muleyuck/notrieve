@@ -36,6 +36,8 @@ pub enum Event<'a> {
     Rebuilding(RebuildReason),
     Indexing(Progress<'a>),
     CorruptDbMoved(&'a Path),
+    /// Note text is about to go to an embedding API on this host (remote spec §5.1).
+    SendingToRemote(&'a str),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -144,6 +146,7 @@ pub fn index(
         exclude: &vault.config.exclude,
         chunk_max_tokens: vault.config.chunk_max_tokens(),
         budget: request.budget,
+        deadline: None,
         rebuild: request.rebuild,
     };
     indexer::index_vault(
@@ -187,6 +190,7 @@ pub fn search_vault<E: Embedder + ?Sized>(
             exclude: &vault.config.exclude,
             chunk_max_tokens: vault.config.chunk_max_tokens(),
             budget: Some(Duration::from_millis(vault.config.search_budget_ms)),
+            deadline: None,
             rebuild: false,
         };
         indexer::index_vault(
@@ -257,6 +261,7 @@ fn forward(event: IndexEvent<'_>, on_event: &mut dyn FnMut(Event<'_>)) {
     on_event(match event {
         IndexEvent::Rebuilding(reason) => Event::Rebuilding(reason),
         IndexEvent::File(progress) => Event::Indexing(progress),
+        IndexEvent::SendingToRemote { host } => Event::SendingToRemote(host),
     });
 }
 

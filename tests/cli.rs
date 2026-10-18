@@ -303,3 +303,17 @@ fn index_with_a_remote_model_goes_through_the_api() {
     assert!(stdout(&o).starts_with("indexed 1,"), "{}", stdout(&o));
     assert_eq!(api.requests().len(), 1);
 }
+
+#[test]
+fn index_reports_a_stop_on_stderr_and_exits_0() {
+    let api = FakeApi::start(Reply::status(503));
+    let env = Env::new();
+    let root = remote_vault(&env, "notes", &api.base);
+    fs::write(root.join("a.md"), "# A\nalpha\n").unwrap();
+    let o = env.run(&root, &["index"]);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    let err = stderr(&o);
+    assert!(err.contains("stopped:"), "{err}");
+    assert!(err.contains("1 file(s) left for the next run"), "{err}");
+    assert!(stdout(&o).starts_with("indexed 0,"), "{}", stdout(&o));
+}

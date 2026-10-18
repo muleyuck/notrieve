@@ -49,6 +49,7 @@ impl Fixture {
             exclude: &[],
             chunk_max_tokens: 450,
             budget: None,
+            deadline: None,
             rebuild: false,
         };
         let fps = Fingerprints {

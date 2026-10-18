@@ -86,6 +86,7 @@ pub fn index_with(vault: &Vault, fps: &Fingerprints) {
         exclude: &[],
         chunk_max_tokens: 450,
         budget: None,
+        deadline: None,
         rebuild: false,
     };
     index_vault(

@@ -123,6 +123,7 @@ fn index(
         exclude: &[],
         chunk_max_tokens: 450,
         budget: None,
+        deadline: None,
         rebuild: false,
     };
     index_vault(root, store, &mut cache, embedder, fps, &opts, &mut |_| {}).unwrap()

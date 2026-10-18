@@ -436,6 +436,17 @@ impl Store {
     }
 
     /// Keys of every chunk's vector in the embedding cache.
+    /// The embedding key of one chunk, to read the index's vector dimension from the cache.
+    pub fn any_embedding_key(&self) -> Result<Option<EmbeddingKey>> {
+        if !self.has_table("chunks")? {
+            return Ok(None);
+        }
+        Ok(self
+            .conn
+            .query_row("SELECT embedding_key FROM chunks LIMIT 1", [], |r| r.get(0))
+            .optional()?)
+    }
+
     pub fn embedding_keys(&self) -> Result<HashSet<EmbeddingKey>> {
         if !self.has_table("chunks")? {
             return Ok(HashSet::new());
