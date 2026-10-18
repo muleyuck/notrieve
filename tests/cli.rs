@@ -6,6 +6,9 @@ use tempfile::TempDir;
 
 mod support;
 
+use support::fake_api::{FakeApi, Reply};
+use support::remote_config;
+
 struct Env {
     home: TempDir,
 }
@@ -262,4 +265,41 @@ fn mcp_outside_any_vault_answers_tools_with_the_vault_error_and_keeps_stdout_to_
         !env.home.path().join("cache/notrieve/models").exists(),
         "no model was fetched"
     );
+}
+
+fn remote_vault(env: &Env, name: &str, base: &str) -> PathBuf {
+    let root = env.dir(name);
+    fs::create_dir_all(root.join(".notrieve")).unwrap();
+    fs::write(
+        root.join(".notrieve/config.toml"),
+        remote_config(base, "", ""),
+    )
+    .unwrap();
+    root
+}
+
+#[test]
+fn model_pull_for_a_remote_model_downloads_nothing() {
+    let env = Env::new();
+    let root = remote_vault(&env, "notes", "http://127.0.0.1:9/v1");
+    let o = env.run(&root, &["model", "pull"]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    assert!(
+        stdout(&o).contains("model is remote (127.0.0.1); nothing to download"),
+        "{}",
+        stdout(&o)
+    );
+    assert!(!env.home.path().join("cache/notrieve").exists());
+}
+
+#[test]
+fn index_with_a_remote_model_goes_through_the_api() {
+    let api = FakeApi::start(Reply::Embed { dim: 8 });
+    let env = Env::new();
+    let root = remote_vault(&env, "notes", &api.base);
+    fs::write(root.join("a.md"), "# A\nalpha\n").unwrap();
+    let o = env.run(&root, &["index"]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    assert!(stdout(&o).starts_with("indexed 1,"), "{}", stdout(&o));
+    assert_eq!(api.requests().len(), 1);
 }

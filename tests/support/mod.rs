@@ -1,7 +1,10 @@
 //! Helpers shared by the background-update and MCP tests. Each test crate uses a subset.
 #![allow(dead_code)]
+pub mod fake_api;
+
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
+use std::path::Path;
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
@@ -9,10 +12,10 @@ use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use notrieve::cache::{EmbeddingCache, cache_path};
-use notrieve::config::Vault;
+use notrieve::config::{ModelContract, RemoteContract, Vault, VaultConfig};
 use notrieve::embed::fake::FakeEmbedder;
-use notrieve::embed::{Embedder, lock_unpoisoned};
-use notrieve::fingerprint::Fingerprints;
+use notrieve::embed::{Embedder, RemoteEmbedder, lock_unpoisoned};
+use notrieve::fingerprint::{Fingerprints, remote_fingerprints};
 use notrieve::indexer::{IndexOptions, index_vault};
 use notrieve::lock;
 use notrieve::store::Store;
@@ -277,4 +280,54 @@ pub fn mcp_search_session(mut command: Command, query: &str) -> (Vec<Value>, Exi
         "stdout closed before the search answer: {lines:?}"
     );
     (lines, status)
+}
+
+/// A remote vault config. `top` holds top-level settings, `model` extra [model] lines.
+pub fn remote_config(base: &str, top: &str, model: &str) -> String {
+    format!(
+        "chunk_max_tokens = 400\n{top}\n[model]\nsource = \"openai-compat:{base}\"\nremote_model = \"test-model\"\n{model}\n"
+    )
+}
+
+/// A vault at `<tmp>/notes` whose model is the endpoint at `base`.
+pub fn remote_vault(base: &str, top: &str, model: &str) -> (TempDir, Vault) {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().join("notes");
+    fs::create_dir_all(root.join(".notrieve")).unwrap();
+    fs::write(
+        root.join(".notrieve/config.toml"),
+        remote_config(base, top, model),
+    )
+    .unwrap();
+    let vault = Vault::load(&root, None).unwrap();
+    (tmp, vault)
+}
+
+pub fn remote_contract(base: &str, model: &str) -> RemoteContract {
+    let config = VaultConfig::parse(&remote_config(base, "", model)).unwrap();
+    match config.model.resolve(Path::new("/")).unwrap() {
+        ModelContract::Remote(contract) => contract,
+        other => panic!("expected a remote model: {other:?}"),
+    }
+}
+
+/// The variable `remote_embedder` serves the key from, and the key.
+pub const TEST_KEY_ENV: &str = "TEST_KEY";
+pub const TEST_KEY: &str = "sk-test-SECRET";
+
+/// A `RemoteEmbedder` for `base` with no waits between retries and `TEST_KEY` in `TEST_KEY_ENV`.
+pub fn remote_embedder(base: &str, model: &str) -> RemoteEmbedder {
+    RemoteEmbedder::new(remote_contract(base, model))
+        .with_retry_delays(&[Duration::ZERO; 3])
+        .with_env(|name| (name == TEST_KEY_ENV).then(|| TEST_KEY.to_string()))
+}
+
+/// The fingerprints `app::load_model` gives the vault's remote model.
+pub fn remote_fps(vault: &Vault) -> Fingerprints {
+    match vault.config.model.resolve(&vault.root).unwrap() {
+        ModelContract::Remote(contract) => {
+            remote_fingerprints(&contract, vault.config.chunk_max_tokens())
+        }
+        other => panic!("expected a remote model: {other:?}"),
+    }
 }

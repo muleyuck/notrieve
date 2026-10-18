@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use notrieve::app::{self, Event, IndexRequest, Paths};
+use notrieve::app::{self, Event, IndexRequest, Paths, PullOutcome};
 use notrieve::embed::download::DownloadEvent;
 use notrieve::indexer::IndexReport;
 use notrieve::mcp::{self, NotrieveServer};
@@ -236,8 +236,12 @@ fn run(cli: Cli) -> Result<()> {
             command: ModelCommand::Pull { vault, force },
         } => {
             let vault = app::open_vault(vault.as_deref(), &cwd, &paths)?;
-            let dir = app::pull_model(&vault, &paths, force, &mut print_event)?;
-            println!("model files are in {}", dir.display());
+            match app::pull_model(&vault, &paths, force, &mut print_event)? {
+                PullOutcome::Downloaded(dir) => println!("model files are in {}", dir.display()),
+                PullOutcome::Remote { host } => {
+                    println!("model is remote ({host}); nothing to download")
+                }
+            }
         }
         Command::Vault { command } => match command {
             VaultCommand::Add {

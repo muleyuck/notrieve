@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use notrieve::app::{self, Paths};
 use notrieve::config::{Vault, model_cache_dir};
-use notrieve::embed::{Embedder, OnnxEmbedder};
+use notrieve::embed::Embedder;
 use notrieve::fingerprint::Fingerprints;
 use notrieve::search::SearchQuery;
 use serde::Deserialize;
@@ -85,10 +85,10 @@ struct Outcome {
 
 fn recall_at_5(vault: &Vault, paths: &Paths) -> Outcome {
     let (embedder, fps) = app::load_model(vault, paths, &mut |_| {}).unwrap();
-    run_queries(vault, &embedder, &fps)
+    run_queries(vault, embedder.as_ref(), &fps)
 }
 
-fn run_queries(vault: &Vault, embedder: &OnnxEmbedder, fps: &Fingerprints) -> Outcome {
+fn run_queries(vault: &Vault, embedder: &dyn Embedder, fps: &Fingerprints) -> Outcome {
     let text = fs::read_to_string(eval_dir().join("queries.toml")).unwrap();
     let queries: Queries = toml::from_str(&text).unwrap();
     let mut found = 0;
@@ -251,7 +251,7 @@ fn compare_candidate_models() {
         let paths = paths(tmp.path());
         // Model download and load stay outside the timed part.
         let (embedder, fps) = app::load_model(&vault, &paths, &mut |_| {}).unwrap();
-        let outcome = run_queries(&vault, &embedder, &fps);
+        let outcome = run_queries(&vault, embedder.as_ref(), &fps);
         let min_cos = batch_independence(&vault, &paths);
         println!(
             "{id}: Recall@5 {:.3} ({} misses), Recall@1 {:.3}, MRR@5 {:.3}, single-vs-batch min cos {min_cos:.7}, index+first search {:.1}s, mean query {:.0}ms",

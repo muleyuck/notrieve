@@ -2,11 +2,11 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::cache::{EmbeddingCache, cache_path};
-use crate::config::{self, ModelContract, OnnxContract, Registry, Vault};
+use crate::config::{self, ModelContract, Registry, Vault};
 use crate::embed::download::{DownloadEvent, ensure_model, with_model};
 use crate::embed::onnx::resolve_threads;
-use crate::embed::{Embedder, OnnxEmbedder};
-use crate::fingerprint::{Fingerprints, fingerprints};
+use crate::embed::{Embedder, OnnxEmbedder, RemoteEmbedder};
+use crate::fingerprint::{Fingerprints, fingerprints, remote_fingerprints};
 use crate::indexer::scan::{plan_changes, scan_vault};
 use crate::indexer::{self, IndexEvent, IndexOptions, IndexReport, Progress};
 use crate::lock;
@@ -92,16 +92,33 @@ pub fn list_vaults(paths: &Paths) -> Result<Registry> {
     Registry::load(&paths.registry)
 }
 
+/// What `notrieve model pull` did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PullOutcome {
+    Downloaded(PathBuf),
+    /// A remote model has nothing to download.
+    Remote {
+        host: String,
+    },
+}
+
 pub fn pull_model(
     vault: &Vault,
     paths: &Paths,
     force: bool,
     on_event: &mut dyn FnMut(Event<'_>),
-) -> Result<PathBuf> {
-    let contract = local_contract(vault)?;
-    ensure_model(&contract, &paths.model_cache, force, &mut |e| {
-        on_event(Event::Download(e))
-    })
+) -> Result<PullOutcome> {
+    match vault.config.model.resolve(&vault.root)? {
+        ModelContract::Local(contract) => {
+            ensure_model(&contract, &paths.model_cache, force, &mut |e| {
+                on_event(Event::Download(e))
+            })
+            .map(PullOutcome::Downloaded)
+        }
+        ModelContract::Remote(contract) => Ok(PullOutcome::Remote {
+            host: contract.host,
+        }),
+    }
 }
 
 pub fn index(
@@ -133,7 +150,7 @@ pub fn index(
         &vault.root,
         &mut store,
         &mut cache,
-        &embedder,
+        embedder.as_ref(),
         &fps,
         &opts,
         &mut |e| forward(e, on_event),
@@ -149,7 +166,7 @@ pub fn search(
 ) -> Result<SearchResponse> {
     query.validate()?;
     let (embedder, fps) = load_model(vault, paths, on_event)?;
-    search_vault(vault, &embedder, &fps, query, on_event)
+    search_vault(vault, embedder.as_ref(), &fps, query, on_event)
 }
 
 /// Updates within `search_budget_ms` when no other process holds the lock, then light-scans and
@@ -205,14 +222,21 @@ pub fn search_vault<E: Embedder + ?Sized>(
     })
 }
 
-/// Loads the vault's model and computes its fingerprints while the model cache lock is held.
+/// Loads the vault's model and computes its fingerprints. A local model is read while the model
+/// cache lock is held; a remote one downloads nothing (its API key is read per request).
 pub fn load_model(
     vault: &Vault,
     paths: &Paths,
     on_event: &mut dyn FnMut(Event<'_>),
-) -> Result<(OnnxEmbedder, Fingerprints)> {
-    let contract = local_contract(vault)?;
+) -> Result<(Box<dyn Embedder>, Fingerprints)> {
     let max = vault.config.chunk_max_tokens();
+    let contract = match vault.config.model.resolve(&vault.root)? {
+        ModelContract::Remote(contract) => {
+            let fps = remote_fingerprints(&contract, max);
+            return Ok((Box::new(RemoteEmbedder::new(contract)), fps));
+        }
+        ModelContract::Local(contract) => contract,
+    };
     with_model(
         &contract,
         &paths.model_cache,
@@ -221,21 +245,12 @@ pub fn load_model(
         |dir| {
             let embedder =
                 OnnxEmbedder::load(&contract, dir, resolve_threads(vault.config.index_threads))?;
+            // Spec §4.3; a remote model has no token limit to check against (remote spec §2).
             check_chunk_limit(max, embedder.effective_max_tokens())?;
             let fps = fingerprints(&contract, dir, max)?;
-            Ok((embedder, fps))
+            Ok((Box::new(embedder) as Box<dyn Embedder>, fps))
         },
     )
-}
-
-/// Remote models are wired in by the next change (`RemoteEmbedder`); until then they are refused.
-fn local_contract(vault: &Vault) -> Result<OnnxContract> {
-    match vault.config.model.resolve(&vault.root)? {
-        ModelContract::Local(contract) => Ok(contract),
-        ModelContract::Remote(_) => Err(Error::Config(
-            "remote models (`openai-compat:`) are not supported by this build yet".into(),
-        )),
-    }
 }
 
 fn forward(event: IndexEvent<'_>, on_event: &mut dyn FnMut(Event<'_>)) {

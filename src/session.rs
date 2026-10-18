@@ -27,7 +27,7 @@ impl Session {
     /// Loads the vault's model (downloading it if needed), then starts as `with_embedder`.
     pub fn start(vault: Vault, paths: &Paths, on_event: &mut dyn FnMut(Event<'_>)) -> Result<Self> {
         let (embedder, fps) = app::load_model(&vault, paths, on_event)?;
-        Self::with_embedder(vault, Arc::new(embedder), fps)
+        Self::with_embedder(vault, Arc::from(embedder), fps)
     }
 
     /// Starts the background updater and asks for a first run, which rebuilds on a mismatch.
