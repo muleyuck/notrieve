@@ -4,6 +4,8 @@ pub mod onnx;
 
 pub use onnx::OnnxEmbedder;
 
+use std::sync::{Mutex, MutexGuard};
+
 use crate::Result;
 use crate::markdown::chunk::TokenCount;
 
@@ -35,5 +37,33 @@ impl<T: Embedder + ?Sized> TokenCount for T {
 
     fn token_ends(&self, text: &str) -> Result<Vec<usize>> {
         Embedder::token_ends(self, text)
+    }
+}
+
+/// Takes a model lock even after a panic poisoned it. Spec §6 requires search to continue after
+/// the update thread panics; with the poison kept, every later query on the shared model would
+/// fail. notrieve treats the model as reusable after a failed call.
+pub fn lock_unpoisoned<T>(lock: &Mutex<T>) -> MutexGuard<'_, T> {
+    lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::lock_unpoisoned;
+    use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn a_lock_poisoned_by_a_panic_is_still_usable() {
+        let model = Arc::new(Mutex::new(41));
+        let poisoner = Arc::clone(&model);
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoner.lock().unwrap();
+            panic!("inference panicked");
+        })
+        .join();
+        assert!(model.is_poisoned());
+        let mut guard = lock_unpoisoned(&model);
+        *guard += 1;
+        assert_eq!(*guard, 42);
     }
 }

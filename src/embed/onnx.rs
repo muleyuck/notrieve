@@ -174,10 +174,7 @@ impl OnnxEmbedder {
         let mut out = Vec::with_capacity(inputs.len());
         // The lock is taken per batch so a query can run between two batches.
         for batch in inputs.chunks(BATCH_SIZE) {
-            let mut model = self
-                .model
-                .lock()
-                .map_err(|_| Error::Embedding("model lock is poisoned".into()))?;
+            let mut model = super::lock_unpoisoned(&self.model);
             let output = model
                 .transform(batch, Some(batch.len()))
                 .map_err(|e| Error::Embedding(e.to_string()))?;

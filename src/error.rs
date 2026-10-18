@@ -54,6 +54,9 @@ pub enum Error {
     NoteNotFound(String),
     #[error("invalid line range: {0}")]
     InvalidLineRange(String),
+    /// A background indexer failure; the message is complete (it names the indexer).
+    #[error("{0}")]
+    IndexerFailed(String),
     #[error("{path}: {source}")]
     Io {
         path: PathBuf,

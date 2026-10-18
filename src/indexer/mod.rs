@@ -1,4 +1,5 @@
 pub mod scan;
+pub mod updater;
 
 use std::collections::HashSet;
 use std::path::Path;
