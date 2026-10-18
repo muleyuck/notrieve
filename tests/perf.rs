@@ -200,7 +200,15 @@ fn ten_thousand_files_rebuild_from_the_cache_in_30_seconds_and_search_within_the
         "睡眠",
     ] {
         let started = Instant::now();
-        let hits = search(&reader, &embedder, &updated.index, &SearchQuery::new(text)).unwrap();
+        let hits = search(
+            &reader,
+            &embedder,
+            &updated.index,
+            &SearchQuery::new(text),
+            None,
+        )
+        .unwrap()
+        .hits;
         let took = started.elapsed();
         eprintln!("search {text:?}: {took:?}");
         assert_eq!(hits.len(), DEFAULT_K);

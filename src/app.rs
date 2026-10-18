@@ -1,5 +1,5 @@
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::cache::{EmbeddingCache, cache_path};
 use crate::config::{self, ModelContract, Registry, Vault};
@@ -172,8 +172,12 @@ pub fn search(
     search_vault(vault, embedder.as_ref(), &fps, query, on_event)
 }
 
+/// Remote spec §5.2: the end of `search_budget_ms` is kept for embedding the query (a guess at
+/// one round trip with a TLS handshake; not measured).
+pub const QUERY_RESERVE: Duration = Duration::from_millis(1000);
+
 /// Updates within `search_budget_ms` when no other process holds the lock, then light-scans and
-/// searches (spec §5.3).
+/// searches (spec §5.3). A remote model gets deadlines instead (remote spec §5.2).
 pub fn search_vault<E: Embedder + ?Sized>(
     vault: &Vault,
     embedder: &E,
@@ -182,18 +186,29 @@ pub fn search_vault<E: Embedder + ?Sized>(
     on_event: &mut dyn FnMut(Event<'_>),
 ) -> Result<SearchResponse> {
     query.validate()?;
+    let started = Instant::now();
+    let budget = Duration::from_millis(vault.config.search_budget_ms);
+    let remote = embedder.is_remote();
+    // A remote update ends `QUERY_RESERVE` early; with no more budget than that, it is skipped.
+    let update_deadline = budget
+        .checked_sub(QUERY_RESERVE)
+        .filter(|left| !left.is_zero())
+        .map(|left| started + left);
+    let mut indexer_error = None;
     let db = vault.db_path();
-    if let Some(_lock) = lock::try_lock(&vault.lock_path())? {
+    if (!remote || update_deadline.is_some())
+        && let Some(_lock) = lock::try_lock(&vault.lock_path())?
+    {
         let mut store = Store::open(&db)?;
         let mut cache = EmbeddingCache::open(&cache_path(&db))?;
         let opts = IndexOptions {
             exclude: &vault.config.exclude,
             chunk_max_tokens: vault.config.chunk_max_tokens(),
-            budget: Some(Duration::from_millis(vault.config.search_budget_ms)),
-            deadline: None,
+            budget: (!remote).then_some(budget),
+            deadline: if remote { update_deadline } else { None },
             rebuild: false,
         };
-        indexer::index_vault(
+        match indexer::index_vault(
             &vault.root,
             &mut store,
             &mut cache,
@@ -201,7 +216,12 @@ pub fn search_vault<E: Embedder + ?Sized>(
             fps,
             &opts,
             &mut |e| forward(e, on_event),
-        )?;
+        ) {
+            Ok(_) => {}
+            // An API setting that is wrong (auth, protocol) still leaves the index searchable.
+            Err(e @ Error::Remote { .. }) => indexer_error = Some(e.to_string()),
+            Err(e) => return Err(e),
+        }
     }
     let reader = search::open_reader(&db)?;
     let scan = scan_vault(&vault.root, &vault.config.exclude)?;
@@ -217,12 +237,15 @@ pub fn search_vault<E: Embedder + ?Sized>(
     } else {
         IndexState::IdleStale
     };
-    let results = search::search(&reader, embedder, &fps.index, query)?;
+    let query_deadline = remote.then(|| (started + budget).max(Instant::now() + QUERY_RESERVE));
+    let found = search::search(&reader, embedder, &fps.index, query, query_deadline)?;
     Ok(SearchResponse {
-        results,
+        vector_search: found.vector_search(),
+        vector_error: found.vector_error,
+        results: found.hits,
         stale_files,
         index_state,
-        indexer_error: None,
+        indexer_error,
     })
 }
 

@@ -209,6 +209,10 @@ fn run(cli: Cli) -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&response)?);
             } else {
                 print_results(&response);
+                // `--json` carries both in the JSON (remote spec §5.2).
+                for notice in search_notices(&response) {
+                    eprintln!("{notice}");
+                }
             }
             // On stderr in both formats, so stdout stays the results alone (spec §5.3).
             if let Some(notice) = stale_notice(&response) {
@@ -362,6 +366,19 @@ fn print_results(response: &SearchResponse) {
     }
 }
 
+fn search_notices(response: &SearchResponse) -> Vec<String> {
+    let mut notices = Vec::new();
+    if let Some(error) = &response.indexer_error {
+        notices.push(format!("the index was not updated: {error}"));
+    }
+    if let Some(reason) = &response.vector_error {
+        notices.push(format!(
+            "semantic search is unavailable ({reason}); showing full-text matches only"
+        ));
+    }
+    notices
+}
+
 fn stale_notice(response: &SearchResponse) -> Option<String> {
     (response.stale_files > 0).then(|| {
         format!(
@@ -375,7 +392,7 @@ fn stale_notice(response: &SearchResponse) -> Option<String> {
 #[cfg(test)]
 mod search_output_tests {
     use super::*;
-    use notrieve::search::IndexState;
+    use notrieve::search::{IndexState, VectorSearch};
 
     #[test]
     fn stopped_notice_names_the_reason_and_the_files_left() {
@@ -399,7 +416,39 @@ mod search_output_tests {
             stale_files,
             index_state,
             indexer_error: None,
+            vector_search: VectorSearch::Ok,
+            vector_error: None,
         }
+    }
+
+    #[test]
+    fn a_failed_update_is_noticed() {
+        let response = SearchResponse {
+            indexer_error: Some("embedding API error: HTTP 401".into()),
+            ..response(0, IndexState::Fresh)
+        };
+        assert_eq!(
+            search_notices(&response),
+            ["the index was not updated: embedding API error: HTTP 401"]
+        );
+    }
+
+    #[test]
+    fn a_missing_vector_side_is_noticed() {
+        let response = SearchResponse {
+            vector_search: VectorSearch::Unavailable,
+            vector_error: Some("HTTP 503".into()),
+            ..response(0, IndexState::Fresh)
+        };
+        assert_eq!(
+            search_notices(&response),
+            ["semantic search is unavailable (HTTP 503); showing full-text matches only"]
+        );
+    }
+
+    #[test]
+    fn a_complete_search_has_no_notice() {
+        assert!(search_notices(&response(0, IndexState::Fresh)).is_empty());
     }
 
     #[test]
