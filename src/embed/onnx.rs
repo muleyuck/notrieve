@@ -9,7 +9,7 @@ use fastembed::{
 use tokenizers::{PostProcessor, Tokenizer};
 
 use super::Embedder;
-use crate::config::{ModelContract, Pooling};
+use crate::config::{OnnxContract, Pooling};
 use crate::{Error, Result};
 
 pub const BATCH_SIZE: usize = 8;
@@ -20,7 +20,7 @@ pub const TOKENIZER_FILES: [&str; 4] = [
     "tokenizer_config.json",
 ];
 
-pub fn required_files(contract: &ModelContract) -> Vec<&str> {
+pub fn required_files(contract: &OnnxContract) -> Vec<&str> {
     TOKENIZER_FILES
         .iter()
         .copied()
@@ -111,14 +111,14 @@ pub fn resolve_threads(configured: usize) -> usize {
 }
 
 pub struct OnnxEmbedder {
-    contract: ModelContract,
+    contract: OnnxContract,
     model: Mutex<TextEmbedding>,
     counter: Tokenizer,
     effective_max_tokens: usize,
 }
 
 impl OnnxEmbedder {
-    pub fn load(contract: &ModelContract, dir: &Path, threads: usize) -> Result<Self> {
+    pub fn load(contract: &OnnxContract, dir: &Path, threads: usize) -> Result<Self> {
         for file in required_files(contract) {
             if !dir.join(file).is_file() {
                 return Err(Error::ModelFileMissing {
@@ -249,7 +249,7 @@ mod tests {
     #[test]
     fn missing_tokenizer_file_is_named_before_loading() {
         let dir = TempDir::new().unwrap();
-        let c = ModelContract {
+        let c = OnnxContract {
             id: "m".into(),
             source: ModelSource::Path {
                 dir: dir.path().to_path_buf(),
@@ -343,7 +343,7 @@ mod tests {
             bert_like_tokenizer_json(),
         )
         .unwrap();
-        let c = ModelContract {
+        let c = OnnxContract {
             id: "m".into(),
             source: ModelSource::Path {
                 dir: dir.path().to_path_buf(),

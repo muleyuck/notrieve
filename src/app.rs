@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::cache::{EmbeddingCache, cache_path};
-use crate::config::{self, Registry, Vault};
+use crate::config::{self, ModelContract, OnnxContract, Registry, Vault};
 use crate::embed::download::{DownloadEvent, ensure_model, with_model};
 use crate::embed::onnx::resolve_threads;
 use crate::embed::{Embedder, OnnxEmbedder};
@@ -98,7 +98,7 @@ pub fn pull_model(
     force: bool,
     on_event: &mut dyn FnMut(Event<'_>),
 ) -> Result<PathBuf> {
-    let contract = vault.config.model.resolve(&vault.root)?;
+    let contract = local_contract(vault)?;
     ensure_model(&contract, &paths.model_cache, force, &mut |e| {
         on_event(Event::Download(e))
     })
@@ -125,7 +125,7 @@ pub fn index(
     };
     let opts = IndexOptions {
         exclude: &vault.config.exclude,
-        chunk_max_tokens: vault.config.chunk_max_tokens,
+        chunk_max_tokens: vault.config.chunk_max_tokens(),
         budget: request.budget,
         rebuild: request.rebuild,
     };
@@ -168,7 +168,7 @@ pub fn search_vault<E: Embedder + ?Sized>(
         let mut cache = EmbeddingCache::open(&cache_path(&db))?;
         let opts = IndexOptions {
             exclude: &vault.config.exclude,
-            chunk_max_tokens: vault.config.chunk_max_tokens,
+            chunk_max_tokens: vault.config.chunk_max_tokens(),
             budget: Some(Duration::from_millis(vault.config.search_budget_ms)),
             rebuild: false,
         };
@@ -211,8 +211,8 @@ pub fn load_model(
     paths: &Paths,
     on_event: &mut dyn FnMut(Event<'_>),
 ) -> Result<(OnnxEmbedder, Fingerprints)> {
-    let contract = vault.config.model.resolve(&vault.root)?;
-    let max = vault.config.chunk_max_tokens;
+    let contract = local_contract(vault)?;
+    let max = vault.config.chunk_max_tokens();
     with_model(
         &contract,
         &paths.model_cache,
@@ -226,6 +226,16 @@ pub fn load_model(
             Ok((embedder, fps))
         },
     )
+}
+
+/// Remote models are wired in by the next change (`RemoteEmbedder`); until then they are refused.
+fn local_contract(vault: &Vault) -> Result<OnnxContract> {
+    match vault.config.model.resolve(&vault.root)? {
+        ModelContract::Local(contract) => Ok(contract),
+        ModelContract::Remote(_) => Err(Error::Config(
+            "remote models (`openai-compat:`) are not supported by this build yet".into(),
+        )),
+    }
 }
 
 fn forward(event: IndexEvent<'_>, on_event: &mut dyn FnMut(Event<'_>)) {

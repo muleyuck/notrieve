@@ -20,6 +20,8 @@ fn cosine(a: &[f32], b: &[f32]) -> f32 {
 fn preset_embedder() -> OnnxEmbedder {
     let contract = ModelSpec::Preset(PRESET_RURI_V3_30M.into())
         .resolve(Path::new("."))
+        .unwrap()
+        .into_local()
         .unwrap();
     let dir = ensure_model(&contract, &model_cache_dir().unwrap(), false, &mut |_| {}).unwrap();
     OnnxEmbedder::load(&contract, &dir, 2).unwrap()
@@ -76,6 +78,8 @@ fn contract_pooling_takes_effect_and_mean_matches_the_models_own_sentence_embedd
     use notrieve::config::Pooling;
     let mean_contract = ModelSpec::Preset(PRESET_RURI_V3_30M.into())
         .resolve(Path::new("."))
+        .unwrap()
+        .into_local()
         .unwrap();
     assert_eq!(mean_contract.pooling, Pooling::Mean);
     let dir = ensure_model(

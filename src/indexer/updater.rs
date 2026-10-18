@@ -203,7 +203,7 @@ fn run_once(
     let mut cache = EmbeddingCache::open(&cache_path(&db))?;
     let opts = IndexOptions {
         exclude: &vault.config.exclude,
-        chunk_max_tokens: vault.config.chunk_max_tokens,
+        chunk_max_tokens: vault.config.chunk_max_tokens(),
         budget: None,
         rebuild: false,
     };
