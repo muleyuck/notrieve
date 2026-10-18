@@ -1,12 +1,15 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use notrieve::app::{self, Event, IndexRequest, Paths};
 use notrieve::embed::download::DownloadEvent;
 use notrieve::indexer::IndexReport;
+use notrieve::mcp::{self, NotrieveServer};
 use notrieve::search::{DEFAULT_K, MAX_K, SearchQuery, SearchResponse};
+use notrieve::session::Session;
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
@@ -71,6 +74,12 @@ enum Command {
     Vault {
         #[command(subcommand)]
         command: VaultCommand,
+    },
+    /// Serve one vault over MCP (stdio) to AI agents such as Claude Code and Codex
+    Mcp {
+        /// Registered vault to use (default: the vault containing the current directory, then the default vault)
+        #[arg(long)]
+        vault: Option<String>,
     },
 }
 
@@ -201,6 +210,27 @@ fn run(cli: Cli) -> Result<()> {
             if let Some(notice) = stale_notice(&response) {
                 eprintln!("{notice}");
             }
+        }
+        Command::Mcp { vault } => {
+            // stdout carries the protocol; progress and errors go to stderr (spec §6).
+            let server = match app::open_vault(vault.as_deref(), &cwd, &paths)
+                .and_then(|vault| Session::start(vault, &paths, &mut print_event))
+            {
+                Ok(session) => NotrieveServer::new(Arc::new(session)),
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    NotrieveServer::unavailable(e.to_string())
+                }
+            };
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .context("cannot start the async runtime")?;
+            let served = runtime.block_on(mcp::serve_stdio(server));
+            // Dropping a runtime waits for blocking work; a request still running when stdin
+            // closed must not keep the process alive.
+            runtime.shutdown_background();
+            served.map_err(|e| anyhow::anyhow!("{e}"))?;
         }
         Command::Model {
             command: ModelCommand::Pull { vault, force },

@@ -5,6 +5,8 @@ use notrieve::config::{ModelSpec, PRESET_RURI_V3_30M, model_cache_dir};
 use notrieve::embed::download::ensure_model;
 use notrieve::embed::{Embedder, OnnxEmbedder};
 
+mod support;
+
 fn enabled() -> bool {
     std::env::var("NOTRIEVE_TEST_MODEL").as_deref() == Ok("1")
 }
@@ -233,5 +235,35 @@ fn cli_search_json_finds_the_note_and_reports_a_fresh_index() {
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(v["index_state"], "fresh");
     assert_eq!(v["stale_files"], 0);
+    assert_eq!(v["results"][0]["path"], "税金.md");
+}
+
+#[test]
+fn mcp_search_over_stdio_finds_the_note_and_keeps_stdout_to_json_rpc() {
+    if !enabled() {
+        eprintln!("skipped: set NOTRIEVE_TEST_MODEL=1");
+        return;
+    }
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("notes");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("税金.md"), "# 医療費控除\n領収書を集める。\n").unwrap();
+    std::fs::write(root.join("旅行.md"), "# 京都\n紅葉の季節に嵐山を歩いた。\n").unwrap();
+    let command = |args: &[&str]| {
+        let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_notrieve"));
+        command
+            .args(args)
+            .current_dir(&root)
+            .env("XDG_CONFIG_HOME", tmp.path().join("config"));
+        command
+    };
+    assert_eq!(command(&["init"]).output().unwrap().status.code(), Some(0));
+    let (lines, status) = support::mcp_search_session(command(&["mcp"]), "医療費の控除");
+    assert!(status.success(), "{status}");
+    assert!(lines.iter().all(|l| l["jsonrpc"] == "2.0"), "{lines:?}");
+    let result = &lines.last().unwrap()["result"];
+    assert_eq!(result["isError"], false, "{result}");
+    let v: serde_json::Value =
+        serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
     assert_eq!(v["results"][0]["path"], "税金.md");
 }

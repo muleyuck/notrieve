@@ -7,6 +7,7 @@ pub mod fingerprint;
 pub mod indexer;
 pub mod lock;
 pub mod markdown;
+pub mod mcp;
 pub mod note;
 pub mod search;
 pub mod session;
