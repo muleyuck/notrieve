@@ -48,6 +48,12 @@ pub enum Error {
     IndexNotReady,
     #[error("{0} is not valid UTF-8")]
     NotUtf8(String),
+    #[error("`{0}` is outside the vault")]
+    OutsideVault(String),
+    #[error("no note at `{0}` in the vault")]
+    NoteNotFound(String),
+    #[error("invalid line range: {0}")]
+    InvalidLineRange(String),
     #[error("{path}: {source}")]
     Io {
         path: PathBuf,
