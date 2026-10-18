@@ -11,6 +11,8 @@ use notrieve::mcp::{self, NotrieveServer};
 use notrieve::search::{DEFAULT_K, MAX_K, SearchQuery, SearchResponse};
 use notrieve::session::Session;
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::filter::filter_fn;
+use tracing_subscriber::prelude::*;
 
 #[derive(Parser)]
 #[command(
@@ -33,6 +35,9 @@ enum Command {
         /// Make this the default vault (the first registered vault always is)
         #[arg(long)]
         default: bool,
+        /// Stop after writing the settings: no model download and no index
+        #[arg(long)]
+        no_index: bool,
     },
     /// Update the index
     Index {
@@ -115,10 +120,22 @@ enum VaultCommand {
 }
 
 fn main() -> ExitCode {
-    let filter = EnvFilter::try_from_env("NOTRIEVE_LOG").unwrap_or_else(|_| EnvFilter::new("warn"));
-    tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        .with_env_filter(filter)
+    let user_filter =
+        EnvFilter::try_from_env("NOTRIEVE_LOG").unwrap_or_else(|_| EnvFilter::new("warn"));
+    // ureq prints some request header values at debug level and ureq-proto the whole request at
+    // trace level, so an API key can reach either. A directive cannot cap them (a longer target in
+    // NOTRIEVE_LOG wins), so a second filter keeps only their info and above whatever the first
+    // allows.
+    let cap_ureq = filter_fn(|meta| {
+        !(meta.target().starts_with("ureq") && *meta.level() > tracing::Level::INFO)
+    });
+    tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(std::io::stderr)
+                .with_filter(user_filter)
+                .with_filter(cap_ureq),
+        )
         .init();
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
@@ -158,19 +175,30 @@ fn run(cli: Cli) -> Result<()> {
     let paths = Paths::from_env()?;
     let cwd = std::env::current_dir().context("cannot read the current directory")?;
     match cli.command {
-        Command::Init { name, default } => {
+        Command::Init {
+            name,
+            default,
+            no_index,
+        } => {
             let vault = app::init(&cwd, name.as_deref(), default, &paths)?;
             println!(
                 "initialized vault `{}` at {}",
                 vault.name.as_deref().unwrap_or_default(),
                 vault.root.display()
             );
-            let request = IndexRequest {
-                rebuild: false,
-                wait: true,
-                budget: None,
-            };
-            print_report(&app::index(&vault, &paths, &request, &mut print_event)?);
+            if no_index {
+                println!(
+                    "edit {} and then run `notrieve index`",
+                    vault.config_dir().join("config.toml").display()
+                );
+            } else {
+                let request = IndexRequest {
+                    rebuild: false,
+                    wait: true,
+                    budget: None,
+                };
+                print_report(&app::index(&vault, &paths, &request, &mut print_event)?);
+            }
         }
         Command::Index {
             vault,

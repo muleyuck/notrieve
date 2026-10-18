@@ -9,22 +9,6 @@ pub const PRESET_RURI_V3_30M: &str = "ruri-v3-30m";
 pub const REMOTE_SOURCE_PREFIX: &str = "openai-compat:";
 pub const DEFAULT_BATCH_SIZE: usize = 32;
 pub const MAX_BATCH_SIZE: usize = 256;
-/// Headers whose values ureq 3.4 logs at debug level (its NON_SENSITIVE_HEADERS list).
-const UREQ_LOGGED_HEADERS: [&str; 13] = [
-    "Date",
-    "Content-Type",
-    "Content-Length",
-    "Transfer-Encoding",
-    "Connection",
-    "Content-Encoding",
-    "Host",
-    "Accept",
-    "Accept-Encoding",
-    "Accept-Charset",
-    "Server",
-    "User-Agent",
-    "Location",
-];
 /// Set by notrieve in every request body, so `query_params` / `document_params` cannot hold them.
 const RESERVED_PARAMS: [&str; 3] = ["input", "model", "encoding_format"];
 
@@ -237,15 +221,6 @@ impl ModelTable {
         if ureq::http::HeaderName::from_bytes(auth_header.as_bytes()).is_err() {
             return Err(Error::Config(format!(
                 "model.auth_header must be an HTTP header name (got \"{auth_header}\")"
-            )));
-        }
-        // ureq logs the values of these headers at debug level; a key sent in one would be logged.
-        if UREQ_LOGGED_HEADERS
-            .iter()
-            .any(|name| name.eq_ignore_ascii_case(&auth_header))
-        {
-            return Err(Error::Config(format!(
-                "model.auth_header cannot be \"{auth_header}\": the HTTP client logs the value of that header"
             )));
         }
         let batch_size = self.batch_size.unwrap_or(DEFAULT_BATCH_SIZE);
@@ -757,14 +732,5 @@ mod tests {
     fn auth_header_must_be_a_header_name() {
         let message = config_error(resolve_remote(OPENAI, "auth_header = \"api key\""));
         assert!(message.contains("model.auth_header"), "{message}");
-    }
-
-    #[test]
-    fn auth_header_must_not_be_one_ureq_logs() {
-        for name in ["Accept", "content-type", "User-Agent"] {
-            let message =
-                config_error(resolve_remote(OPENAI, &format!("auth_header = \"{name}\"")));
-            assert!(message.contains("model.auth_header"), "{name}: {message}");
-        }
     }
 }
