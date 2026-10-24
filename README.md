@@ -1,5 +1,29 @@
 # notrieve
 
+## Install
+
+Homebrew:
+
+```sh
+brew install muleyuck/tap/notrieve
+```
+
+From source (needs a Rust toolchain):
+
+```sh
+cargo install --git https://github.com/muleyuck/notrieve
+```
+
+Or download `notrieve-<target>.tar.xz` from [GitHub Releases](https://github.com/muleyuck/notrieve/releases),
+unpack it and put `notrieve` on your `PATH`. Targets: `aarch64-apple-darwin`,
+`aarch64-unknown-linux-gnu`, `x86_64-unknown-linux-gnu`.
+
+## Requirements
+
+- macOS 13.4 or later on Apple Silicon. Intel Macs are not supported.
+- Linux x86_64 or aarch64 with glibc 2.38 or later and `GLIBCXX_3.4.31` or later (Ubuntu 24.04 or
+  later). Ubuntu 22.04 does not work.
+
 ## Use from AI agents (MCP)
 
 `notrieve mcp` is a stdio MCP server, so any client that can launch one can use it. Claude Code and
