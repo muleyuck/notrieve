@@ -1,0 +1,33 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "timezone": "Asia/Tokyo",
+  "schedule": ["on saturday"],
+  "reviewers": ["muleyuck"],
+  "prConcurrentLimit": 10,
+  "semanticCommits": "enabled",
+  "automergeType": "pr",
+  "automergeStrategy": "squash",
+  "dependencyDashboard": true,
+  "minimumReleaseAge": "3 days",
+  "internalChecksFilter": "strict",
+  "lockFileMaintenance": {
+    "enabled": true,
+    "schedule": ["on saturday"]
+  },
+  "packageRules": [
+    { "matchManagers": ["github-actions"], "groupName": "github-actions dependencies" },
+    { "matchManagers": ["github-actions"], "matchUpdateTypes": ["patch", "minor", "digest"], "automerge": true },
+
+    { "matchManagers": ["cargo"], "matchUpdateTypes": ["major"], "enabled": false },
+
+    { "matchManagers": ["cargo"], "matchDepTypes": ["dev-dependencies"], "semanticCommitScope": "deps-dev" },
+    { "matchManagers": ["cargo"], "matchDepTypes": ["dev-dependencies"], "matchUpdateTypes": ["patch", "minor"], "automerge": true },
+
+    { "matchManagers": ["mise"], "matchDepNames": ["rust"], "groupName": "rust toolchain", "automerge": false },
+    { "matchManagers": ["mise"], "matchDepNames": ["rust"], "matchUpdateTypes": ["major"], "enabled": false },
+
+    { "matchManagers": ["mise"], "matchDepNames": ["prek"], "matchUpdateTypes": ["patch", "minor"], "automerge": true },
+
+    { "matchUpdateTypes": ["lockFileMaintenance"], "automerge": false, "minimumReleaseAge": null }
+  ]
+}
