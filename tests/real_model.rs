@@ -27,25 +27,40 @@ fn preset_embedder() -> OnnxEmbedder {
     OnnxEmbedder::load(&contract, &dir, 2).unwrap()
 }
 
+fn sample_texts() -> Vec<String> {
+    vec![
+        "瑠璃色は紫みを帯びた濃い青。".to_string(),
+        "SQLite の FTS5 で全文検索する。".to_string(),
+    ]
+}
+
 #[test]
-fn preset_model_produces_normalised_batch_independent_prefix_aware_vectors() {
+fn preset_model_produces_normalised_256_dimension_vectors() {
     if !enabled() {
         eprintln!("skipped: set NOTRIEVE_TEST_MODEL=1");
         return;
     }
     let e = preset_embedder();
     assert_eq!((e.dim(), e.effective_max_tokens()), (256, 512));
-    let texts = vec![
-        "瑠璃色は紫みを帯びた濃い青。".to_string(),
-        "SQLite の FTS5 で全文検索する。".to_string(),
-    ];
-    let batch = e.embed_documents(&texts).unwrap();
     let norm = |v: &[f32]| v.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let vectors = e.embed_documents(&sample_texts()).unwrap();
+    assert_eq!(vectors.len(), 2);
     assert!(
-        batch
+        vectors
             .iter()
             .all(|v| v.len() == 256 && (norm(v) - 1.0).abs() < 1e-4)
     );
+}
+
+#[test]
+fn preset_model_vectors_do_not_depend_on_the_batch_or_the_run() {
+    if !enabled() {
+        eprintln!("skipped: set NOTRIEVE_TEST_MODEL=1");
+        return;
+    }
+    let e = preset_embedder();
+    let texts = sample_texts();
+    let batch = e.embed_documents(&texts).unwrap();
     let single = e.embed_documents(&texts[..1]).unwrap();
     assert!(
         cosine(&single[0], &batch[0]) >= 0.99999,
@@ -53,8 +68,28 @@ fn preset_model_produces_normalised_batch_independent_prefix_aware_vectors() {
         cosine(&single[0], &batch[0])
     );
     assert_eq!(e.embed_documents(&texts[..1]).unwrap(), single);
-    let query = e.embed_query(&texts[0]).unwrap();
-    assert!(cosine(&query, &batch[0]) < 0.9999, "prefix not applied");
+}
+
+#[test]
+fn preset_model_applies_the_query_prefix() {
+    if !enabled() {
+        eprintln!("skipped: set NOTRIEVE_TEST_MODEL=1");
+        return;
+    }
+    let e = preset_embedder();
+    let text = &sample_texts()[0];
+    let document = e.embed_documents(std::slice::from_ref(text)).unwrap();
+    let query = e.embed_query(text).unwrap();
+    assert!(cosine(&query, &document[0]) < 0.9999, "prefix not applied");
+}
+
+#[test]
+fn preset_model_token_ends_are_increasing_char_boundaries() {
+    if !enabled() {
+        eprintln!("skipped: set NOTRIEVE_TEST_MODEL=1");
+        return;
+    }
+    let e = preset_embedder();
     assert!(e.count_tokens("").unwrap() >= 3);
     let text = "医療費控除の領収書を集める";
     let ends = e.token_ends(text).unwrap();
@@ -66,8 +101,26 @@ fn preset_model_produces_normalised_batch_independent_prefix_aware_vectors() {
     assert!(ends.iter().all(|&end| text.is_char_boundary(end)));
 }
 
+const POOLING_TEXTS: [&str; 3] = [
+    "瑠璃色は紫みを帯びた濃い青。",
+    "SQLite の FTS5 で全文検索する。",
+    "医療費控除の領収書を集める",
+];
+
+/// The preset's contract (mean pooling) and the directory holding its files.
+fn mean_contract_and_dir() -> (notrieve::config::OnnxContract, std::path::PathBuf) {
+    let contract = ModelSpec::Preset(PRESET_RURI_V3_30M.into())
+        .resolve(Path::new("."))
+        .unwrap()
+        .into_local()
+        .unwrap();
+    assert_eq!(contract.pooling, notrieve::config::Pooling::Mean);
+    let dir = ensure_model(&contract, &model_cache_dir().unwrap(), false, &mut |_| {}).unwrap();
+    (contract, dir)
+}
+
 #[test]
-fn contract_pooling_takes_effect_and_mean_matches_the_models_own_sentence_embedding() {
+fn mean_pooling_matches_the_models_own_sentence_embedding() {
     if !enabled() {
         eprintln!("skipped: set NOTRIEVE_TEST_MODEL=1");
         return;
@@ -75,24 +128,8 @@ fn contract_pooling_takes_effect_and_mean_matches_the_models_own_sentence_embedd
     use fastembed::{
         InitOptionsUserDefined, TextEmbedding, TokenizerFiles, UserDefinedEmbeddingModel,
     };
-    use notrieve::config::Pooling;
-    let mean_contract = ModelSpec::Preset(PRESET_RURI_V3_30M.into())
-        .resolve(Path::new("."))
-        .unwrap()
-        .into_local()
-        .unwrap();
-    assert_eq!(mean_contract.pooling, Pooling::Mean);
-    let dir = ensure_model(
-        &mean_contract,
-        &model_cache_dir().unwrap(),
-        false,
-        &mut |_| {},
-    )
-    .unwrap();
-    let mut cls_contract = mean_contract.clone();
-    cls_contract.pooling = Pooling::Cls;
-    let mean = OnnxEmbedder::load(&mean_contract, &dir, 2).unwrap();
-    let cls = OnnxEmbedder::load(&cls_contract, &dir, 2).unwrap();
+    let (contract, dir) = mean_contract_and_dir();
+    let mean = OnnxEmbedder::load(&contract, &dir, 2).unwrap();
 
     // fastembed's default output selection: the model's own pooled `sentence_embedding`.
     let read = |name: &str| std::fs::read(dir.join(name)).unwrap();
@@ -102,26 +139,38 @@ fn contract_pooling_takes_effect_and_mean_matches_the_models_own_sentence_embedd
         special_tokens_map_file: read("special_tokens_map.json"),
         tokenizer_config_file: read("tokenizer_config.json"),
     };
-    let model = UserDefinedEmbeddingModel::new(read(&mean_contract.onnx_file), files)
+    let model = UserDefinedEmbeddingModel::new(read(&contract.onnx_file), files)
         .with_pooling(fastembed::Pooling::Mean);
     let mut reference = TextEmbedding::try_new_from_user_defined(
         model,
-        InitOptionsUserDefined::new().with_max_length(mean_contract.max_tokens),
+        InitOptionsUserDefined::new().with_max_length(contract.max_tokens),
     )
     .unwrap();
 
-    let norm = |v: &[f32]| v.iter().map(|x| x * x).sum::<f32>().sqrt();
-    for text in [
-        "瑠璃色は紫みを帯びた濃い青。",
-        "SQLite の FTS5 で全文検索する。",
-        "医療費控除の領収書を集める",
-    ] {
-        let input = format!("{}{text}", mean_contract.document_prefix);
+    for text in POOLING_TEXTS {
+        let input = format!("{}{text}", contract.document_prefix);
         let expected = reference.embed([input], None).unwrap().remove(0);
         let by_mean = mean.embed_documents(&[text.to_string()]).unwrap().remove(0);
-        let by_cls = cls.embed_documents(&[text.to_string()]).unwrap().remove(0);
         let to_reference = cosine(&by_mean, &expected);
         assert!(to_reference >= 0.99999, "mean drifted: {to_reference}");
+    }
+}
+
+#[test]
+fn cls_pooling_gives_normalised_vectors_unlike_mean() {
+    if !enabled() {
+        eprintln!("skipped: set NOTRIEVE_TEST_MODEL=1");
+        return;
+    }
+    let (mean_contract, dir) = mean_contract_and_dir();
+    let mut cls_contract = mean_contract.clone();
+    cls_contract.pooling = notrieve::config::Pooling::Cls;
+    let mean = OnnxEmbedder::load(&mean_contract, &dir, 2).unwrap();
+    let cls = OnnxEmbedder::load(&cls_contract, &dir, 2).unwrap();
+    let norm = |v: &[f32]| v.iter().map(|x| x * x).sum::<f32>().sqrt();
+    for text in POOLING_TEXTS {
+        let by_mean = mean.embed_documents(&[text.to_string()]).unwrap().remove(0);
+        let by_cls = cls.embed_documents(&[text.to_string()]).unwrap().remove(0);
         assert!((norm(&by_cls) - 1.0).abs() < 1e-4);
         let mean_vs_cls = cosine(&by_mean, &by_cls);
         assert!(mean_vs_cls < 0.9999, "cls pooling ignored: {mean_vs_cls}");

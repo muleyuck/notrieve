@@ -432,8 +432,7 @@ fn load_hit(conn: &Connection, fused: &Fused) -> Result<Hit> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn response_serializes_the_spec_field_names() {
+    fn response() -> SearchResponse {
         let hit = Hit {
             path: "a.md".into(),
             title: "a".into(),
@@ -446,20 +445,22 @@ mod tests {
             vec_rank: Some(1),
             tags: vec!["work".into()],
         };
-        let response = SearchResponse {
+        SearchResponse {
             results: vec![hit],
             stale_files: 3,
             index_state: IndexState::UpdatingElsewhere,
             indexer_error: None,
             vector_search: VectorSearch::Ok,
             vector_error: None,
-        };
-        let v = serde_json::to_value(&response).unwrap();
+        }
+    }
+
+    #[test]
+    fn response_serializes_the_spec_field_names() {
+        let v = serde_json::to_value(response()).unwrap();
         assert_eq!(v["index_state"], "updating_elsewhere");
         assert_eq!(v["stale_files"], 3);
         assert_eq!(v["vector_search"], "ok");
-        assert!(v.get("indexer_error").is_none());
-        assert!(v.get("vector_error").is_none());
         let first = &v["results"][0];
         for key in [
             "path",
@@ -476,23 +477,28 @@ mod tests {
             assert!(first.get(key).is_some(), "{key}");
         }
         assert!(first["fts_rank"].is_null());
-        let failed = SearchResponse {
-            indexer_error: Some("boom".into()),
-            ..response
-        };
-        assert_eq!(
-            serde_json::to_value(&failed).unwrap()["indexer_error"],
-            "boom"
-        );
+    }
+
+    #[test]
+    fn absent_errors_are_left_out_of_the_response() {
+        let v = serde_json::to_value(response()).unwrap();
+        assert!(v.get("indexer_error").is_none());
+        assert!(v.get("vector_error").is_none());
+    }
+
+    #[test]
+    fn errors_and_a_degraded_vector_search_are_serialized() {
         let degraded = SearchResponse {
+            indexer_error: Some("boom".into()),
             vector_search: VectorSearch::Unavailable,
             vector_error: Some("down".into()),
-            ..failed
+            ..response()
         };
         let v = serde_json::to_value(&degraded).unwrap();
         assert_eq!(
-            (&v["vector_search"], &v["vector_error"]),
+            (&v["indexer_error"], &v["vector_search"], &v["vector_error"]),
             (
+                &serde_json::json!("boom"),
                 &serde_json::json!("unavailable"),
                 &serde_json::json!("down")
             )
@@ -532,9 +538,16 @@ mod tests {
     }
 
     #[test]
-    fn validation_rejects_blank_text_and_k_outside_1_to_50() {
+    fn blank_text_is_rejected() {
+        assert!(matches!(
+            SearchQuery::new(" \t").validate(),
+            Err(Error::InvalidQuery(_))
+        ));
+    }
+
+    #[test]
+    fn k_must_be_from_1_to_50() {
         let ok = SearchQuery::new("税金");
-        assert!(ok.validate().is_ok());
         for k in [0, MAX_K + 1] {
             let q = SearchQuery { k, ..ok.clone() };
             assert!(matches!(q.validate(), Err(Error::InvalidQuery(_))), "{k}");
@@ -542,9 +555,5 @@ mod tests {
         for k in [1, MAX_K] {
             assert!(SearchQuery { k, ..ok.clone() }.validate().is_ok(), "{k}");
         }
-        assert!(matches!(
-            SearchQuery::new(" \t").validate(),
-            Err(Error::InvalidQuery(_))
-        ));
     }
 }

@@ -207,12 +207,31 @@ mod tests {
     }
 
     #[test]
-    fn key_depends_on_the_model_and_the_input() {
-        let base = embedding_key("model-a", "税金\n医療費");
-        assert_eq!(base, embedding_key("model-a", "税金\n医療費"));
-        assert_ne!(base, embedding_key("model-b", "税金\n医療費"));
-        assert_ne!(base, embedding_key("model-a", "税金\n医療"));
-        // The separator keeps "ab" + "c" apart from "a" + "bc".
+    fn same_model_and_input_give_the_same_key() {
+        assert_eq!(
+            embedding_key("model-a", "税金\n医療費"),
+            embedding_key("model-a", "税金\n医療費")
+        );
+    }
+
+    #[test]
+    fn another_model_gives_another_key() {
+        assert_ne!(
+            embedding_key("model-a", "税金\n医療費"),
+            embedding_key("model-b", "税金\n医療費")
+        );
+    }
+
+    #[test]
+    fn another_input_gives_another_key() {
+        assert_ne!(
+            embedding_key("model-a", "税金\n医療費"),
+            embedding_key("model-a", "税金\n医療")
+        );
+    }
+
+    #[test]
+    fn the_separator_keeps_model_and_input_apart() {
         assert_ne!(embedding_key("ab", "c"), embedding_key("a", "bc"));
     }
 

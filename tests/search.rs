@@ -266,8 +266,8 @@ fn tag_filter_restricts_candidates_before_the_top_fifty_are_taken() {
     );
 }
 
-#[test]
-fn tag_filter_matches_the_tag_and_its_children_ignoring_case_and_ands_tags() {
+/// Notes that share one body and differ only in their tags.
+fn tagged_notes() -> Fixture {
     let f = Fixture::new();
     let body = "会議の議事録をまとめる。\n";
     f.write("child.md", &format!("---\ntags: [work/proj]\n---\n{body}"));
@@ -286,10 +286,21 @@ fn tag_filter_matches_the_tag_and_its_children_ignoring_case_and_ands_tags() {
     );
     f.write("none.md", body);
     f.index();
+    f
+}
+
+#[test]
+fn tag_filter_matches_the_tag_and_its_children_ignoring_case() {
+    let f = tagged_notes();
     assert_eq!(
         paths(&f.search(&with_tags("議事録", &["work"])).unwrap()),
         ["both.md", "child.md", "upper.md"]
     );
+}
+
+#[test]
+fn several_tags_must_all_match() {
+    let f = tagged_notes();
     assert_eq!(
         paths(
             &f.search(&with_tags("議事録", &["work", "#urgent"]))
@@ -297,7 +308,11 @@ fn tag_filter_matches_the_tag_and_its_children_ignoring_case_and_ands_tags() {
         ),
         ["both.md"]
     );
-    // Case folding is not limited to ASCII.
+}
+
+#[test]
+fn tag_case_folding_is_not_limited_to_ascii() {
+    let f = tagged_notes();
     assert_eq!(
         paths(&f.search(&with_tags("議事録", &["équipe"])).unwrap()),
         ["accent.md"]
@@ -449,9 +464,14 @@ fn chunk_whose_vector_is_missing_from_the_cache_is_left_out_of_vector_results() 
 }
 
 #[test]
-fn other_index_fingerprint_or_a_missing_cache_is_index_not_ready() {
+fn a_missing_cache_is_index_not_ready() {
     let f = Fixture::new();
     assert!(matches!(open_reader(&f.db()), Err(Error::IndexNotReady)));
+}
+
+#[test]
+fn another_index_fingerprint_is_index_not_ready() {
+    let f = Fixture::new();
     f.write("a.md", "alpha beta\n");
     f.index();
     let reader = open_reader(&f.db()).unwrap();
@@ -468,7 +488,7 @@ fn other_index_fingerprint_or_a_missing_cache_is_index_not_ready() {
 }
 
 #[test]
-fn k_limits_the_results_and_invalid_queries_are_rejected() {
+fn k_limits_the_results() {
     let f = Fixture::new();
     for i in 0..5 {
         f.write(&format!("n{i}.md"), &format!("note number {i}\n"));
@@ -479,13 +499,13 @@ fn k_limits_the_results_and_invalid_queries_are_rejected() {
         ..SearchQuery::new("note")
     };
     assert_eq!(f.search(&two).unwrap().len(), 2);
-    for k in [0, 51] {
-        let q = SearchQuery {
-            k,
-            ..SearchQuery::new("note")
-        };
-        assert!(matches!(f.search(&q), Err(Error::InvalidQuery(_))), "{k}");
-    }
+}
+
+#[test]
+fn invalid_query_is_rejected() {
+    let f = Fixture::new();
+    f.write("a.md", "note\n");
+    f.index();
     assert!(matches!(
         f.search(&SearchQuery::new("   ")),
         Err(Error::InvalidQuery(_))

@@ -136,13 +136,19 @@ fn usage_errors_exit_1_with_clap_message() {
 }
 
 #[test]
-fn help_and_version_exit_0() {
+fn help_exits_0() {
     let env = Env::new();
-    for flag in ["--help", "--version"] {
-        let out = env.run(env.home.path(), &[flag]);
-        assert_eq!(out.status.code(), Some(0), "{flag}");
-        assert!(!stdout(&out).is_empty());
-    }
+    let out = env.run(env.home.path(), &["--help"]);
+    assert_eq!(out.status.code(), Some(0));
+    assert!(!stdout(&out).is_empty());
+}
+
+#[test]
+fn version_exits_0() {
+    let env = Env::new();
+    let out = env.run(env.home.path(), &["--version"]);
+    assert_eq!(out.status.code(), Some(0));
+    assert!(!stdout(&out).is_empty());
 }
 
 #[test]

@@ -60,7 +60,7 @@ fn synced_session(notes: &[(&str, &str)]) -> (TempDir, Arc<Session>) {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn tools_are_search_and_get_note_and_instructions_ask_for_sources() {
+async fn tools_are_search_and_get_note() {
     let (_tmp, session) = synced_session(&[("a.md", "# A\nalpha\n")]);
     let client = connect(NotrieveServer::new(session)).await;
     let mut names: Vec<String> = client
@@ -73,6 +73,12 @@ async fn tools_are_search_and_get_note_and_instructions_ask_for_sources() {
         .collect();
     names.sort();
     assert_eq!(names, ["get_note", "search"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn instructions_ask_for_sources_and_the_index_state() {
+    let (_tmp, session) = synced_session(&[("a.md", "# A\nalpha\n")]);
+    let client = connect(NotrieveServer::new(session)).await;
     let instructions = client.peer_info().unwrap().instructions.clone().unwrap();
     for phrase in ["path:start_line", "get_note", "stale_files"] {
         assert!(instructions.contains(phrase), "{phrase}: {instructions}");
@@ -111,9 +117,8 @@ async fn invalid_query_is_a_tool_error_not_a_crash() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn get_note_returns_the_line_range_and_refuses_paths_outside_the_index() {
-    let (tmp, session) = synced_session(&[("a.md", "# A\nalpha\nbeta\n")]);
-    std::fs::write(tmp.path().join("outside.md"), "SECRET\n").unwrap();
+async fn get_note_returns_the_line_range() {
+    let (_tmp, session) = synced_session(&[("a.md", "# A\nalpha\nbeta\n")]);
     let client = connect(NotrieveServer::new(session)).await;
     let result = call(
         &client,
@@ -127,6 +132,13 @@ async fn get_note_returns_the_line_range_and_refuses_paths_outside_the_index() {
         (v["text"].as_str(), v["end_line"].as_u64()),
         (Some("alpha\nbeta\n"), Some(3))
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn get_note_refuses_paths_outside_the_index() {
+    let (tmp, session) = synced_session(&[("a.md", "# A\nalpha\n")]);
+    std::fs::write(tmp.path().join("outside.md"), "SECRET\n").unwrap();
+    let client = connect(NotrieveServer::new(session)).await;
     let outside = call(&client, "get_note", json!({"path": "../outside.md"})).await;
     assert_eq!(outside.is_error, Some(true));
     assert!(
@@ -165,8 +177,8 @@ async fn a_server_that_could_not_start_answers_every_tool_with_the_reason() {
     }
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn omitted_k_returns_the_default_eight_results_and_a_given_k_is_honoured() {
+/// Ten notes that all match "alpha", so the result count shows the k in effect.
+fn ten_alpha_notes() -> (TempDir, Arc<Session>) {
     let notes: Vec<(String, String)> = (0..10)
         .map(|i| {
             (
@@ -179,16 +191,28 @@ async fn omitted_k_returns_the_default_eight_results_and_a_given_k_is_honoured()
         .iter()
         .map(|(p, b)| (p.as_str(), b.as_str()))
         .collect();
-    let (_tmp, session) = synced_session(&notes);
+    synced_session(&notes)
+}
+
+fn count(result: &CallToolResult) -> usize {
+    serde_json::from_str::<Value>(&text(result)).unwrap()["results"]
+        .as_array()
+        .unwrap()
+        .len()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn omitted_k_returns_the_default_eight_results() {
+    let (_tmp, session) = ten_alpha_notes();
     let client = connect(NotrieveServer::new(session)).await;
-    let count = |result: &CallToolResult| {
-        serde_json::from_str::<Value>(&text(result)).unwrap()["results"]
-            .as_array()
-            .unwrap()
-            .len()
-    };
     let default = call(&client, "search", json!({"query": "alpha"})).await;
     assert_eq!(count(&default), 8);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_given_k_is_honoured() {
+    let (_tmp, session) = ten_alpha_notes();
+    let client = connect(NotrieveServer::new(session)).await;
     let three = call(&client, "search", json!({"query": "alpha", "k": 3})).await;
     assert_eq!(count(&three), 3);
 }

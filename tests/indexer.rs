@@ -317,8 +317,7 @@ fn non_utf8_file_is_skipped() {
     assert_eq!(r.skipped[0].path, "latin1.md");
 }
 
-#[test]
-fn tags_aliases_and_line_numbers_are_stored() {
+fn indexed_tax_note() -> (Fixture, Store) {
     let f = Fixture::new();
     f.write(
         "税金メモ.md",
@@ -326,6 +325,12 @@ fn tags_aliases_and_line_numbers_are_stored() {
     );
     let (mut s, e) = (f.store(), FakeEmbedder::new(8));
     f.index(&mut s, &e);
+    (f, s)
+}
+
+#[test]
+fn frontmatter_and_inline_tags_are_stored() {
+    let (_f, s) = indexed_tax_note();
     let mut tags: Vec<String> = s
         .conn()
         .prepare("SELECT tag FROM file_tags")
@@ -336,6 +341,11 @@ fn tags_aliases_and_line_numbers_are_stored() {
         .collect();
     tags.sort();
     assert_eq!(tags, ["確定申告", "税金"]);
+}
+
+#[test]
+fn title_and_aliases_are_stored() {
+    let (_f, s) = indexed_tax_note();
     let (title, aliases): (String, String) = s
         .conn()
         .query_row("SELECT title, aliases FROM files", [], |r| {
@@ -343,6 +353,11 @@ fn tags_aliases_and_line_numbers_are_stored() {
         })
         .unwrap();
     assert_eq!((title.as_str(), aliases.as_str()), ("税金メモ", "tax"));
+}
+
+#[test]
+fn chunk_line_numbers_count_the_frontmatter() {
+    let (_f, s) = indexed_tax_note();
     let lines: (i64, i64) = s
         .conn()
         .query_row("SELECT start_line, end_line FROM chunks", [], |r| {

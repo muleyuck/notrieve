@@ -412,11 +412,16 @@ mod tests {
 
     #[test]
     fn retry_after_is_capped_at_60_seconds() {
-        let wait = |after: Option<u64>, default: u64| {
-            retry_wait(after.map(Duration::from_secs), Duration::from_secs(default))
-        };
-        assert_eq!(wait(Some(61), 1), Duration::from_secs(60));
-        assert_eq!(wait(Some(2), 1), Duration::from_secs(2));
-        assert_eq!(wait(None, 4), Duration::from_secs(4));
+        let wait = |after| retry_wait(Some(Duration::from_secs(after)), Duration::from_secs(1));
+        assert_eq!(wait(61), Duration::from_secs(60));
+        assert_eq!(wait(2), Duration::from_secs(2));
+    }
+
+    #[test]
+    fn missing_retry_after_waits_the_default() {
+        assert_eq!(
+            retry_wait(None, Duration::from_secs(4)),
+            Duration::from_secs(4)
+        );
     }
 }
