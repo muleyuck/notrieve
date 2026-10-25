@@ -84,13 +84,7 @@ pub fn index_with(vault: &Vault, fps: &Fingerprints) {
     let db = vault.db_path();
     let mut store = Store::open(&db).unwrap();
     let mut cache = EmbeddingCache::open(&cache_path(&db)).unwrap();
-    let opts = IndexOptions {
-        exclude: &[],
-        chunk_max_tokens: 450,
-        budget: None,
-        deadline: None,
-        rebuild: false,
-    };
+    let opts = IndexOptions::default();
     index_vault(
         &vault.root,
         &mut store,

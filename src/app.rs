@@ -157,11 +157,9 @@ pub fn index(
         (Store::open(&db)?, EmbeddingCache::open(&cache_file)?)
     };
     let opts = IndexOptions {
-        exclude: &vault.config.exclude,
-        chunk_max_tokens: vault.config.chunk_max_tokens(),
         budget: request.budget,
-        deadline: None,
         rebuild: request.rebuild,
+        ..IndexOptions::for_vault(&vault.config)
     };
     indexer::index_vault(
         &vault.root,
@@ -216,11 +214,9 @@ pub fn search_vault<E: Embedder + ?Sized>(
         let mut store = Store::open(&db)?;
         let mut cache = EmbeddingCache::open(&cache_path(&db))?;
         let opts = IndexOptions {
-            exclude: &vault.config.exclude,
-            chunk_max_tokens: vault.config.chunk_max_tokens(),
             budget: (!remote).then_some(budget),
             deadline: if remote { update_deadline } else { None },
-            rebuild: false,
+            ..IndexOptions::for_vault(&vault.config)
         };
         match indexer::index_vault(
             &vault.root,

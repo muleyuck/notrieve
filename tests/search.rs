@@ -45,13 +45,7 @@ impl Fixture {
     fn index(&self) {
         let mut store = Store::open(&self.db()).unwrap();
         let mut cache = EmbeddingCache::open(&cache_path(&self.db())).unwrap();
-        let opts = IndexOptions {
-            exclude: &[],
-            chunk_max_tokens: 450,
-            budget: None,
-            deadline: None,
-            rebuild: false,
-        };
+        let opts = IndexOptions::default();
         let fps = Fingerprints {
             model: "model-a".into(),
             index: FP.into(),

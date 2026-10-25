@@ -119,13 +119,7 @@ fn index(
     fps: &Fingerprints,
 ) -> notrieve::indexer::IndexReport {
     let mut cache = EmbeddingCache::open(&cache_path(db)).unwrap();
-    let opts = IndexOptions {
-        exclude: &[],
-        chunk_max_tokens: 450,
-        budget: None,
-        deadline: None,
-        rebuild: false,
-    };
+    let opts = IndexOptions::default();
     index_vault(root, store, &mut cache, embedder, fps, &opts, &mut |_| {}).unwrap()
 }
 

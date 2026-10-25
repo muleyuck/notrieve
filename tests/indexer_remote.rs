@@ -35,11 +35,10 @@ fn index_with_events(
     let mut store = Store::open(&db)?;
     let mut cache = EmbeddingCache::open(&cache_path(&db))?;
     let opts = IndexOptions {
-        exclude: &[],
-        chunk_max_tokens: vault.config.chunk_max_tokens(),
         budget: run.budget,
         deadline: run.deadline,
         rebuild: run.rebuild,
+        ..IndexOptions::for_vault(&vault.config)
     };
     index_vault(&vault.root, &mut store, &mut cache, e, fps, &opts, on_event)
 }

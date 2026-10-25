@@ -85,10 +85,9 @@ impl Fixture {
         let exclude: Vec<String> = exclude.iter().map(|s| s.to_string()).collect();
         let opts = IndexOptions {
             exclude: &exclude,
-            chunk_max_tokens: 450,
             budget,
-            deadline: None,
             rebuild,
+            ..IndexOptions::default()
         };
         let mut cache = self.cache();
         index_vault(
@@ -376,10 +375,7 @@ fn invalid_exclude_fails_before_a_fingerprint_rebuild_wipes_the_index() {
     let bad = vec!["[".to_string()];
     let opts = IndexOptions {
         exclude: &bad,
-        chunk_max_tokens: 450,
-        budget: None,
-        deadline: None,
-        rebuild: false,
+        ..IndexOptions::default()
     };
     let result = index_vault(
         f.vault.path(),
@@ -403,13 +399,7 @@ fn malformed_gitignore_line_is_an_error_and_well_formed_one_is_complete() {
     f.write("a.md", "alpha\n");
     f.write("private/p.md", "secret\n");
     let (mut s, e) = (f.store(), FakeEmbedder::new(8));
-    let opts = IndexOptions {
-        exclude: &[],
-        chunk_max_tokens: 450,
-        budget: None,
-        deadline: None,
-        rebuild: false,
-    };
+    let opts = IndexOptions::default();
     let result = index_vault(
         f.vault.path(),
         &mut s,
@@ -464,13 +454,7 @@ fn rebuilding_is_announced_before_any_file_starts() {
     f.write("a.md", "alpha\n");
     f.write("b.md", "beta\n");
     let (mut s, e) = (f.store(), FakeEmbedder::new(8));
-    let opts = IndexOptions {
-        exclude: &[],
-        chunk_max_tokens: 450,
-        budget: None,
-        deadline: None,
-        rebuild: false,
-    };
+    let opts = IndexOptions::default();
     let mut events: Vec<String> = Vec::new();
     index_vault(
         f.vault.path(),
@@ -500,10 +484,8 @@ fn invalid_exclude_with_an_explicit_rebuild_keeps_the_index() {
     let bad = vec!["[".to_string()];
     let opts = IndexOptions {
         exclude: &bad,
-        chunk_max_tokens: 450,
-        budget: None,
-        deadline: None,
         rebuild: true,
+        ..IndexOptions::default()
     };
     let result = index_vault(
         f.vault.path(),
@@ -669,13 +651,7 @@ fn embedder_returning_too_few_vectors_skips_the_file_and_writes_no_index_rows() 
     f.write("a.md", TWO_SECTIONS);
     let mut s = f.store();
     let e = ShortEmbedder(FakeEmbedder::new(8));
-    let opts = IndexOptions {
-        exclude: &[],
-        chunk_max_tokens: 450,
-        budget: None,
-        deadline: None,
-        rebuild: false,
-    };
+    let opts = IndexOptions::default();
     let r = index_vault(
         f.vault.path(),
         &mut s,
@@ -732,13 +708,7 @@ fn failure_after_the_cache_write_leaves_no_dangling_key() {
         )
         .unwrap();
     f.write("a.md", "alpha EXPLODE\n");
-    let opts = IndexOptions {
-        exclude: &[],
-        chunk_max_tokens: 450,
-        budget: None,
-        deadline: None,
-        rebuild: false,
-    };
+    let opts = IndexOptions::default();
     let err = index_vault(
         f.vault.path(),
         &mut s,
@@ -772,13 +742,7 @@ fn vectors_orphaned_by_a_failed_run_are_removed_even_when_nothing_is_reindexed()
         )
         .unwrap();
     f.write("a.md", "alpha EXPLODE\n");
-    let opts = IndexOptions {
-        exclude: &[],
-        chunk_max_tokens: 450,
-        budget: None,
-        deadline: None,
-        rebuild: false,
-    };
+    let opts = IndexOptions::default();
     let failed = index_vault(
         f.vault.path(),
         &mut s,
@@ -809,10 +773,7 @@ fn cache_recreated_before_a_failed_run_is_still_rebuilt_by_the_next_run() {
     let bad = vec!["[".to_string()];
     let opts = IndexOptions {
         exclude: &bad,
-        chunk_max_tokens: 450,
-        budget: None,
-        deadline: None,
-        rebuild: false,
+        ..IndexOptions::default()
     };
     let failed = index_vault(
         f.vault.path(),
@@ -881,13 +842,7 @@ fn unchanged_skipped_file_is_not_retried_but_stays_in_the_report() {
     let (mut s, e) = (f.store(), FakeEmbedder::new(8).failing_on("BOOM"));
     let first = f.index(&mut s, &e);
     assert_eq!(first.skipped.len(), 2);
-    let opts = IndexOptions {
-        exclude: &[],
-        chunk_max_tokens: 450,
-        budget: None,
-        deadline: None,
-        rebuild: false,
-    };
+    let opts = IndexOptions::default();
     let mut attempted: Vec<String> = Vec::new();
     let second = index_vault(
         f.vault.path(),

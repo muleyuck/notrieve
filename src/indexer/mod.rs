@@ -6,6 +6,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use crate::cache::{EmbeddingCache, EmbeddingKey, embedding_key};
+use crate::config::{DEFAULT_CHUNK_MAX_TOKENS, VaultConfig};
 use crate::embed::Embedder;
 use crate::error::RemoteErrorKind;
 use crate::fingerprint::Fingerprints;
@@ -31,6 +32,30 @@ pub struct IndexOptions<'a> {
     pub deadline: Option<Instant>,
     /// Rebuild even when the stored fingerprints match (`index --rebuild`).
     pub rebuild: bool,
+}
+
+impl Default for IndexOptions<'_> {
+    /// Nothing excluded, the default chunk size, no time limit, no forced rebuild.
+    fn default() -> Self {
+        Self {
+            exclude: &[],
+            chunk_max_tokens: DEFAULT_CHUNK_MAX_TOKENS,
+            budget: None,
+            deadline: None,
+            rebuild: false,
+        }
+    }
+}
+
+impl<'a> IndexOptions<'a> {
+    /// The vault's `exclude` and chunk size; callers set the rest with struct update syntax.
+    pub fn for_vault(config: &'a VaultConfig) -> Self {
+        Self {
+            exclude: &config.exclude,
+            chunk_max_tokens: config.chunk_max_tokens(),
+            ..Self::default()
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

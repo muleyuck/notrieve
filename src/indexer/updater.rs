@@ -285,13 +285,7 @@ fn run_once(
         return Err(Error::FingerprintChanged);
     }
     let mut cache = EmbeddingCache::open(&cache_path(&db))?;
-    let opts = IndexOptions {
-        exclude: &vault.config.exclude,
-        chunk_max_tokens: vault.config.chunk_max_tokens(),
-        budget: None,
-        deadline: None,
-        rebuild: false,
-    };
+    let opts = IndexOptions::for_vault(&vault.config);
     let report = indexer::index_vault(
         &vault.root,
         &mut store,
