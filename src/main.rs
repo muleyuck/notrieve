@@ -103,7 +103,7 @@ enum ModelCommand {
 
 #[derive(Subcommand)]
 enum VaultCommand {
-    /// Register a directory that already has .notrieve/
+    /// Register a directory that already has .notrieve/, or approve its changed config again
     Add {
         path: PathBuf,
         /// Name in the vault registry (default: the directory name)
@@ -285,8 +285,11 @@ fn run(cli: Cli) -> Result<()> {
                 name,
                 default,
             } => {
-                let name = app::add_vault(&path, name.as_deref(), default, &paths)?;
+                let (name, settings) = app::add_vault(&path, name.as_deref(), default, &paths)?;
                 println!("registered vault `{name}`");
+                for setting in settings {
+                    println!("  its config {setting}");
+                }
             }
             VaultCommand::List => {
                 let registry = app::list_vaults(&paths)?;

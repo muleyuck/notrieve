@@ -16,6 +16,28 @@ pub enum Error {
     DuplicateVaultName(String),
     #[error("{0} has no .notrieve/config.toml")]
     NotAVault(PathBuf),
+    #[error(
+        "the vault at {} is not registered, and its config {settings}; check {}/.notrieve/config.toml and run `notrieve vault add {}` if you trust it",
+        .root.display(),
+        .root.display(),
+        .root.display()
+    )]
+    UntrustedVault { root: PathBuf, settings: String },
+    #[error(
+        "{} is a symbolic link; notrieve writes its index, lock and cache only as regular files, so remove the link",
+        .0.display()
+    )]
+    IndexFileLinked(PathBuf),
+    #[error(
+        "the config of vault `{name}` changed since you registered it: it now {settings}; check {}/.notrieve/config.toml and run `notrieve vault add {} --name {name}` if you trust it",
+        .root.display(),
+        .root.display()
+    )]
+    VaultConfigChanged {
+        name: String,
+        root: PathBuf,
+        settings: String,
+    },
     #[error("configuration error: {0}")]
     Config(String),
     #[error("another notrieve process is updating the index")]
@@ -42,6 +64,10 @@ pub enum Error {
         "{0} is not a readable SQLite database; run `notrieve index --rebuild` to move it aside and rebuild"
     )]
     DbCorrupt(PathBuf),
+    #[error(
+        "{0} is a database of another program; notrieve leaves it untouched, so set db_path to another file"
+    )]
+    ForeignDatabase(PathBuf),
     #[error(
         "the index was written by a newer notrieve (schema {found}, supported {supported}); update notrieve or run `notrieve index --rebuild`"
     )]

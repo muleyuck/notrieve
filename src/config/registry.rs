@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 
+use super::TrustedSettings;
 use crate::{Error, Result, lock};
 
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
@@ -13,6 +14,9 @@ pub struct Registry {
     pub default: Option<String>,
     #[serde(default)]
     pub vaults: BTreeMap<String, PathBuf>,
+    /// What the user approved when registering each vault (see `TrustedSettings`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub trusted: BTreeMap<String, TrustedSettings>,
 }
 
 impl Registry {
@@ -64,7 +68,16 @@ impl Registry {
         Ok(())
     }
 
+    pub fn trust(&mut self, name: &str, settings: TrustedSettings) {
+        if settings.is_empty() {
+            self.trusted.remove(name);
+        } else {
+            self.trusted.insert(name.to_string(), settings);
+        }
+    }
+
     pub fn remove(&mut self, name: &str) -> Result<PathBuf> {
+        self.trusted.remove(name);
         let removed = self.vaults.remove(name);
         let path = removed.ok_or_else(|| self.not_registered(name))?;
         if self.default.as_deref() == Some(name) {
@@ -104,7 +117,23 @@ impl Registry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::TrustedSettings;
     use tempfile::TempDir;
+
+    #[test]
+    fn removing_a_vault_forgets_what_was_trusted() {
+        let mut r = Registry::default();
+        r.add("notes", Path::new("/a"), false).unwrap();
+        r.trust(
+            "notes",
+            TrustedSettings {
+                index_outside: Some(PathBuf::from("/cache/notes.db")),
+                ..TrustedSettings::default()
+            },
+        );
+        r.remove("notes").unwrap();
+        assert!(r.trusted.is_empty());
+    }
 
     #[test]
     fn missing_file_loads_as_empty_registry() {

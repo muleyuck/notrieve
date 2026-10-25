@@ -1,5 +1,6 @@
 mod model;
 mod registry;
+mod trust;
 mod vault;
 
 pub use model::{
@@ -7,6 +8,7 @@ pub use model::{
     RemoteContract,
 };
 pub use registry::Registry;
+pub use trust::{RemoteTarget, TrustedSettings};
 pub use vault::{Vault, find_vault_root, init_vault, resolve_vault};
 
 use std::ffi::OsString;

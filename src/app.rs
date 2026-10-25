@@ -68,22 +68,36 @@ pub fn init(cwd: &Path, name: Option<&str>, make_default: bool, paths: &Paths) -
     Vault::load(&root, Some(name))
 }
 
+/// Registers the vault, or approves its current config again when `name` already names it, and
+/// returns the name and the settings now trusted (`TrustedSettings`) for the user to review.
 pub fn add_vault(
     path: &Path,
     name: Option<&str>,
     make_default: bool,
     paths: &Paths,
-) -> Result<String> {
+) -> Result<(String, Vec<String>)> {
     let root = path.canonicalize().map_err(|e| Error::io(path, e))?;
-    Vault::load(&root, None)?;
+    let settings = Vault::load(&root, None)?.trusted_settings();
     let name = match name {
         Some(name) => name.to_string(),
         None => dir_name(&root)?,
     };
     Registry::update(&paths.registry, |registry| {
-        registry.add(&name, &root, make_default)
+        let registered = registry
+            .vaults
+            .get(&name)
+            .and_then(|p| p.canonicalize().ok());
+        if registered.as_deref() == Some(root.as_path()) {
+            if make_default {
+                registry.default = Some(name.clone());
+            }
+        } else {
+            registry.add(&name, &root, make_default)?;
+        }
+        registry.trust(&name, settings.clone());
+        Ok(())
     })?;
-    Ok(name)
+    Ok((name, settings.describe()))
 }
 
 pub fn remove_vault(name: &str, paths: &Paths) -> Result<PathBuf> {

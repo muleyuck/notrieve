@@ -153,10 +153,12 @@ impl Store {
             std::fs::create_dir_all(parent).map_err(|e| Error::io(parent, e))?;
         }
         let conn = Connection::open(path).map_err(|e| classify(e, path))?;
-        conn.query_row("SELECT count(*) FROM sqlite_master", [], |r| {
-            r.get::<_, i64>(0)
-        })
-        .map_err(|e| classify(e, path))?;
+        let objects: i64 = conn
+            .query_row("SELECT count(*) FROM sqlite_master", [], |r| r.get(0))
+            .map_err(|e| classify(e, path))?;
+        if objects > 0 && !is_notrieve_index(&conn).map_err(|e| classify(e, path))? {
+            return Err(Error::ForeignDatabase(path.to_path_buf()));
+        }
         conn.query_row("PRAGMA journal_mode=WAL", [], |r| r.get::<_, String>(0))
             .map_err(|e| classify(e, path))?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
@@ -497,6 +499,28 @@ impl Store {
     }
 }
 
+/// Every schema version notrieve has written stores `schema_version` and `index_fingerprint` in
+/// `meta`, in the same transaction as its tables. Any other database is another program's, and a
+/// rebuild would drop its tables that share notrieve's names (`meta`, `files`, `chunks`, ...).
+/// A read error is returned, not taken as "another program's", so that damage still reaches the
+/// move-aside path of `open_for_rebuild`.
+fn is_notrieve_index(conn: &Connection) -> rusqlite::Result<bool> {
+    let columns: i64 = conn.query_row(
+        "SELECT count(*) FROM pragma_table_info('meta') WHERE name IN ('key', 'value')",
+        [],
+        |r| r.get(0),
+    )?;
+    if columns != 2 {
+        return Ok(false);
+    }
+    let keys: i64 = conn.query_row(
+        "SELECT count(DISTINCT key) FROM meta WHERE key IN ('schema_version', 'index_fingerprint')",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(keys == 2)
+}
+
 fn check_fingerprint(tx: &Transaction, fingerprint: &str) -> Result<()> {
     let stored: Option<String> = tx
         .query_row(
@@ -804,6 +828,45 @@ mod tests {
     }
 
     #[test]
+    fn another_programs_database_is_refused_and_left_untouched() {
+        let dir = TempDir::new().unwrap();
+        // The second one has a `meta` table of the same shape, with a schema version of its own.
+        let schemas = [
+            "",
+            "CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT);
+             INSERT INTO meta VALUES ('schema_version', '7');",
+        ];
+        for (i, extra) in schemas.into_iter().enumerate() {
+            let path = dir.path().join(format!("app{i}.db"));
+            Connection::open(&path)
+                .unwrap()
+                .execute_batch(&format!(
+                    "CREATE TABLE files(x TEXT); INSERT INTO files VALUES ('keep'); {extra}"
+                ))
+                .unwrap();
+            assert!(
+                matches!(Store::open(&path), Err(Error::ForeignDatabase(_))),
+                "{i}"
+            );
+            assert!(
+                matches!(
+                    Store::open_for_rebuild(&path),
+                    Err(Error::ForeignDatabase(_))
+                ),
+                "{i}"
+            );
+            let conn = Connection::open(&path).unwrap();
+            let kept: String = conn
+                .query_row("SELECT x FROM files", [], |r| r.get(0))
+                .unwrap();
+            let journal: String = conn
+                .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!((kept.as_str(), journal.as_str()), ("keep", "delete"), "{i}");
+        }
+    }
+
+    #[test]
     fn rebuild_clears_skipped_rows() {
         let dir = TempDir::new().unwrap();
         let mut s = rebuilt(&dir, "fp-a", 4);
@@ -849,6 +912,34 @@ mod tests {
         );
         s.rebuild(&fps("fp-a"), "fake", 4).unwrap();
         assert!(!s.needs_rebuild("fp-a").unwrap());
+    }
+
+    #[test]
+    fn an_index_with_a_damaged_meta_index_is_moved_aside_on_rebuild() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("index.db");
+        let (page, page_size) = {
+            let s = rebuilt(&dir, "fp-a", 4);
+            let conn = s.conn();
+            conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
+                .unwrap();
+            let page: i64 = conn
+                .query_row(
+                    "SELECT rootpage FROM sqlite_master WHERE name = 'sqlite_autoindex_meta_1'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            let size: i64 = conn
+                .query_row("PRAGMA page_size", [], |r| r.get(0))
+                .unwrap();
+            (page as usize, size as usize)
+        };
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes[(page - 1) * page_size..page * page_size].fill(0xA5);
+        std::fs::write(&path, &bytes).unwrap();
+        let (_, moved) = Store::open_for_rebuild(&path).unwrap();
+        assert!(moved.is_some());
     }
 
     #[test]
