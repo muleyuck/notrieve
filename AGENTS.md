@@ -15,6 +15,7 @@ uv run --script scripts/reference.py   # regenerate tests/fixtures/reference-rur
 ```
 
 - Toolchain and tools are pinned in `mise.toml` (Rust, prek). Run `mise install` if they are missing.
+- Only regenerating the reference fixture needs [uv](https://docs.astral.sh/uv/); it is not pinned because its version does not affect the vectors.
 - The prek pre-commit hook (`.pre-commit-config.yml`) runs `cargo fmt --check`, `cargo check`, `cargo clippy` and `cargo test` on every commit.
 - `NOTRIEVE_LOG` sets the tracing filter (default `warn`).
 
