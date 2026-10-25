@@ -1,14 +1,17 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use crate::cache::{EmbeddingCache, cache_path};
 use crate::config::{self, Registry, Vault};
-use crate::embed::OnnxEmbedder;
 use crate::embed::download::{DownloadEvent, ensure_model, with_model};
 use crate::embed::onnx::resolve_threads;
-use crate::fingerprint::index_fingerprint;
-use crate::indexer::{self, IndexOptions, IndexReport, Progress};
+use crate::embed::{Embedder, OnnxEmbedder};
+use crate::fingerprint::{Fingerprints, fingerprints};
+use crate::indexer::scan::{plan_changes, scan_vault};
+use crate::indexer::{self, IndexEvent, IndexOptions, IndexReport, Progress};
 use crate::lock;
-use crate::store::Store;
+use crate::search::{self, IndexState, SearchQuery, SearchResponse};
+use crate::store::{RebuildReason, Store};
 use crate::{Error, Result};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,6 +33,7 @@ impl Paths {
 pub enum Event<'a> {
     WaitingForLock,
     Download(DownloadEvent<'a>),
+    Rebuilding(RebuildReason),
     Indexing(Progress<'a>),
     CorruptDbMoved(&'a Path),
 }
@@ -107,9 +111,109 @@ pub fn index(
     on_event: &mut dyn FnMut(Event<'_>),
 ) -> Result<IndexReport> {
     let _lock = acquire(vault, request.wait, on_event)?;
+    let (embedder, fps) = load_model(vault, paths, on_event)?;
+    let db = vault.db_path();
+    let cache_file = cache_path(&db);
+    let (mut store, mut cache) = if request.rebuild {
+        let (store, moved) = Store::open_for_rebuild(&db)?;
+        if let Some(moved) = &moved {
+            on_event(Event::CorruptDbMoved(moved));
+        }
+        (store, EmbeddingCache::open_for_rebuild(&cache_file)?)
+    } else {
+        (Store::open(&db)?, EmbeddingCache::open(&cache_file)?)
+    };
+    let opts = IndexOptions {
+        exclude: &vault.config.exclude,
+        chunk_max_tokens: vault.config.chunk_max_tokens,
+        budget: request.budget,
+        rebuild: request.rebuild,
+    };
+    indexer::index_vault(
+        &vault.root,
+        &mut store,
+        &mut cache,
+        &embedder,
+        &fps,
+        &opts,
+        &mut |e| forward(e, on_event),
+    )
+}
+
+/// `notrieve search` (spec §5.3). The query is checked before the model is loaded.
+pub fn search(
+    vault: &Vault,
+    paths: &Paths,
+    query: &SearchQuery,
+    on_event: &mut dyn FnMut(Event<'_>),
+) -> Result<SearchResponse> {
+    query.validate()?;
+    let (embedder, fps) = load_model(vault, paths, on_event)?;
+    search_vault(vault, &embedder, &fps, query, on_event)
+}
+
+/// Updates within `search_budget_ms` when no other process holds the lock, then light-scans and
+/// searches (spec §5.3).
+pub fn search_vault<E: Embedder + ?Sized>(
+    vault: &Vault,
+    embedder: &E,
+    fps: &Fingerprints,
+    query: &SearchQuery,
+    on_event: &mut dyn FnMut(Event<'_>),
+) -> Result<SearchResponse> {
+    query.validate()?;
+    let db = vault.db_path();
+    if let Some(_lock) = lock::try_lock(&vault.lock_path())? {
+        let mut store = Store::open(&db)?;
+        let mut cache = EmbeddingCache::open(&cache_path(&db))?;
+        let opts = IndexOptions {
+            exclude: &vault.config.exclude,
+            chunk_max_tokens: vault.config.chunk_max_tokens,
+            budget: Some(Duration::from_millis(vault.config.search_budget_ms)),
+            rebuild: false,
+        };
+        indexer::index_vault(
+            &vault.root,
+            &mut store,
+            &mut cache,
+            embedder,
+            fps,
+            &opts,
+            &mut |e| forward(e, on_event),
+        )?;
+    }
+    let reader = search::open_reader(&db)?;
+    let scan = scan_vault(&vault.root, &vault.config.exclude)?;
+    let stale_files =
+        plan_changes(&scan, &reader.file_states()?, &reader.skipped_states()?).stale_files();
+    // Our own lock was released above, so a held lock belongs to another process (spec §4.5).
+    let index_state = if !scan.complete {
+        IndexState::ScanError
+    } else if lock::try_lock(&vault.lock_path())?.is_none() {
+        IndexState::UpdatingElsewhere
+    } else if stale_files == 0 {
+        IndexState::Fresh
+    } else {
+        IndexState::IdleStale
+    };
+    let results = search::search(&reader, embedder, &fps.index, query)?;
+    Ok(SearchResponse {
+        results,
+        stale_files,
+        index_state,
+        indexer_error: None,
+    })
+}
+
+/// Loads the vault's model and computes its fingerprints while the model cache lock is held.
+pub fn load_model(
+    vault: &Vault,
+    paths: &Paths,
+    on_event: &mut dyn FnMut(Event<'_>),
+) -> Result<(OnnxEmbedder, Fingerprints)> {
     let contract = vault.config.model.resolve(&vault.root)?;
     let max = vault.config.chunk_max_tokens;
-    let (embedder, fingerprint) = with_model(
+    with_model(
         &contract,
         &paths.model_cache,
         false,
@@ -118,36 +222,17 @@ pub fn index(
             let embedder =
                 OnnxEmbedder::load(&contract, dir, resolve_threads(vault.config.index_threads))?;
             check_chunk_limit(max, embedder.effective_max_tokens())?;
-            let fingerprint = index_fingerprint(&contract, dir, max)?;
-            Ok((embedder, fingerprint))
+            let fps = fingerprints(&contract, dir, max)?;
+            Ok((embedder, fps))
         },
-    )?;
-    let db = vault.db_path();
-    let mut store = if request.rebuild {
-        let (mut store, moved) = Store::open_for_rebuild(&db)?;
-        if let Some(moved) = &moved {
-            on_event(Event::CorruptDbMoved(moved));
-        }
-        store.rebuild(&fingerprint, &contract.id, contract.dim)?;
-        store
-    } else {
-        Store::open(&db)?
-    };
-    let opts = IndexOptions {
-        exclude: &vault.config.exclude,
-        chunk_max_tokens: max,
-        budget: request.budget,
-    };
-    let mut report = indexer::index_vault(
-        &vault.root,
-        &mut store,
-        &embedder,
-        &fingerprint,
-        &opts,
-        &mut |p| on_event(Event::Indexing(*p)),
-    )?;
-    report.rebuilt |= request.rebuild;
-    Ok(report)
+    )
+}
+
+fn forward(event: IndexEvent<'_>, on_event: &mut dyn FnMut(Event<'_>)) {
+    on_event(match event {
+        IndexEvent::Rebuilding(reason) => Event::Rebuilding(reason),
+        IndexEvent::File(progress) => Event::Indexing(progress),
+    });
 }
 
 /// Spec §4.3: `chunk_max_tokens` above the model's effective limit is a configuration error.

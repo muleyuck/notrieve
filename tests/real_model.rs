@@ -1,7 +1,7 @@
-//! Runs only with NOTRIEVE_TEST_MODEL=1 (downloads ~530MB on first run).
+//! Runs only with NOTRIEVE_TEST_MODEL=1 (downloads ~150MB on first run).
 use std::path::Path;
 
-use notrieve::config::{ModelSpec, PRESET_RURI_V3_130M, model_cache_dir};
+use notrieve::config::{ModelSpec, PRESET_RURI_V3_30M, model_cache_dir};
 use notrieve::embed::download::ensure_model;
 use notrieve::embed::{Embedder, OnnxEmbedder};
 
@@ -16,7 +16,7 @@ fn cosine(a: &[f32], b: &[f32]) -> f32 {
 }
 
 fn preset_embedder() -> OnnxEmbedder {
-    let contract = ModelSpec::Preset(PRESET_RURI_V3_130M.into())
+    let contract = ModelSpec::Preset(PRESET_RURI_V3_30M.into())
         .resolve(Path::new("."))
         .unwrap();
     let dir = ensure_model(&contract, &model_cache_dir().unwrap(), false, &mut |_| {}).unwrap();
@@ -30,7 +30,7 @@ fn preset_model_produces_normalised_batch_independent_prefix_aware_vectors() {
         return;
     }
     let e = preset_embedder();
-    assert_eq!((e.dim(), e.effective_max_tokens()), (512, 512));
+    assert_eq!((e.dim(), e.effective_max_tokens()), (256, 512));
     let texts = vec![
         "瑠璃色は紫みを帯びた濃い青。".to_string(),
         "SQLite の FTS5 で全文検索する。".to_string(),
@@ -40,7 +40,7 @@ fn preset_model_produces_normalised_batch_independent_prefix_aware_vectors() {
     assert!(
         batch
             .iter()
-            .all(|v| v.len() == 512 && (norm(v) - 1.0).abs() < 1e-4)
+            .all(|v| v.len() == 256 && (norm(v) - 1.0).abs() < 1e-4)
     );
     let single = e.embed_documents(&texts[..1]).unwrap();
     assert!(
@@ -72,7 +72,7 @@ fn contract_pooling_takes_effect_and_mean_matches_the_models_own_sentence_embedd
         InitOptionsUserDefined, TextEmbedding, TokenizerFiles, UserDefinedEmbeddingModel,
     };
     use notrieve::config::Pooling;
-    let mean_contract = ModelSpec::Preset(PRESET_RURI_V3_130M.into())
+    let mean_contract = ModelSpec::Preset(PRESET_RURI_V3_30M.into())
         .resolve(Path::new("."))
         .unwrap();
     assert_eq!(mean_contract.pooling, Pooling::Mean);
@@ -201,4 +201,37 @@ fn cli_init_then_index_prints_counts_and_exits_zero() {
         "{}",
         String::from_utf8_lossy(&again.stdout)
     );
+}
+
+#[test]
+fn cli_search_json_finds_the_note_and_reports_a_fresh_index() {
+    if !enabled() {
+        eprintln!("skipped: set NOTRIEVE_TEST_MODEL=1");
+        return;
+    }
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("notes");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("税金.md"), "# 医療費控除\n領収書を集める。\n").unwrap();
+    std::fs::write(root.join("旅行.md"), "# 京都\n紅葉の季節に嵐山を歩いた。\n").unwrap();
+    let run = |args: &[&str]| {
+        std::process::Command::new(env!("CARGO_BIN_EXE_notrieve"))
+            .args(args)
+            .current_dir(&root)
+            .env("XDG_CONFIG_HOME", tmp.path().join("config"))
+            .output()
+            .unwrap()
+    };
+    assert_eq!(run(&["init"]).status.code(), Some(0));
+    let out = run(&["search", "医療費の控除", "--json"]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["index_state"], "fresh");
+    assert_eq!(v["stale_files"], 0);
+    assert_eq!(v["results"][0]["path"], "税金.md");
 }

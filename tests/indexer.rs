@@ -1,11 +1,22 @@
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
+use notrieve::Error;
+use notrieve::cache::EmbeddingCache;
+use notrieve::embed::Embedder;
 use notrieve::embed::fake::FakeEmbedder;
-use notrieve::indexer::{IndexOptions, IndexReport, index_vault};
-use notrieve::store::Store;
+use notrieve::fingerprint::Fingerprints;
+use notrieve::indexer::{IndexEvent, IndexOptions, IndexReport, index_vault};
+use notrieve::store::{RebuildReason, Store};
 use tempfile::TempDir;
+
+fn fps(model: &str, index: &str) -> Fingerprints {
+    Fingerprints {
+        model: model.into(),
+        index: index.into(),
+    }
+}
 
 struct Fixture {
     vault: TempDir,
@@ -34,6 +45,63 @@ impl Fixture {
         Store::open(&self.data.path().join("index.db")).unwrap()
     }
 
+    fn cache_path(&self) -> PathBuf {
+        notrieve::cache::cache_path(&self.data.path().join("index.db"))
+    }
+
+    fn cache(&self) -> EmbeddingCache {
+        EmbeddingCache::open(&self.cache_path()).unwrap()
+    }
+
+    /// Chunks whose embedding_key has no vector in the cache.
+    fn dangling_keys(&self, store: &Store) -> i64 {
+        let conn = store.conn();
+        conn.execute(
+            "ATTACH DATABASE ?1 AS cache",
+            [self.cache_path().to_str().unwrap()],
+        )
+        .unwrap();
+        let n = conn
+            .query_row(
+                "SELECT count(*) FROM chunks c LEFT JOIN cache.embeddings e
+                 ON e.key = c.embedding_key WHERE e.key IS NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        conn.execute("DETACH DATABASE cache", []).unwrap();
+        n
+    }
+
+    fn run(
+        &self,
+        store: &mut Store,
+        e: &FakeEmbedder,
+        fps: &Fingerprints,
+        exclude: &[&str],
+        budget: Option<Duration>,
+        rebuild: bool,
+    ) -> IndexReport {
+        let exclude: Vec<String> = exclude.iter().map(|s| s.to_string()).collect();
+        let opts = IndexOptions {
+            exclude: &exclude,
+            chunk_max_tokens: 450,
+            budget,
+            rebuild,
+        };
+        let mut cache = self.cache();
+        index_vault(
+            self.vault.path(),
+            store,
+            &mut cache,
+            e,
+            fps,
+            &opts,
+            &mut |_| {},
+        )
+        .unwrap()
+    }
+
     fn index_with(
         &self,
         store: &mut Store,
@@ -42,13 +110,7 @@ impl Fixture {
         exclude: &[&str],
         budget: Option<Duration>,
     ) -> IndexReport {
-        let exclude: Vec<String> = exclude.iter().map(|s| s.to_string()).collect();
-        let opts = IndexOptions {
-            exclude: &exclude,
-            chunk_max_tokens: 450,
-            budget,
-        };
-        index_vault(self.vault.path(), store, e, fp, &opts, &mut |_| {}).unwrap()
+        self.run(store, e, &fps("model-a", fp), exclude, budget, false)
     }
 
     fn index(&self, store: &mut Store, e: &FakeEmbedder) -> IndexReport {
@@ -300,22 +362,6 @@ fn fingerprint_change_rebuilds_everything() {
 }
 
 #[test]
-fn dimension_change_recreates_the_vector_table() {
-    let f = Fixture::new();
-    f.write("a.md", "alpha\n");
-    let mut s = f.store();
-    f.index_with(&mut s, &FakeEmbedder::new(8), "fp-a", &[], None);
-    f.index_with(&mut s, &FakeEmbedder::new(16), "fp-b", &[], None);
-    let len: i64 = s
-        .conn()
-        .query_row("SELECT vec_length(embedding) FROM chunks_vec", [], |r| {
-            r.get(0)
-        })
-        .unwrap();
-    assert_eq!(len, 16);
-}
-
-#[test]
 fn tags_aliases_and_line_numbers_are_stored() {
     let f = Fixture::new();
     f.write(
@@ -362,7 +408,12 @@ fn stale_files_counts_changes_without_hashing() {
     fs::remove_file(f.path("b.md")).unwrap();
     let scan = scan_vault(Path::new(f.vault.path()), &[]).unwrap();
     assert_eq!(
-        plan_changes(&scan, &s.file_states().unwrap()).stale_files(),
+        plan_changes(
+            &scan,
+            &s.file_states().unwrap(),
+            &s.skipped_states().unwrap()
+        )
+        .stale_files(),
         2
     );
 }
@@ -378,8 +429,17 @@ fn invalid_exclude_fails_before_a_fingerprint_rebuild_wipes_the_index() {
         exclude: &bad,
         chunk_max_tokens: 450,
         budget: None,
+        rebuild: false,
     };
-    let result = index_vault(f.vault.path(), &mut s, &e, "fp-b", &opts, &mut |_| {});
+    let result = index_vault(
+        f.vault.path(),
+        &mut s,
+        &mut f.cache(),
+        &e,
+        &fps("model-a", "fp-b"),
+        &opts,
+        &mut |_| {},
+    );
     assert!(result.is_err());
     assert_eq!(paths(&s), ["a.md"]);
     let r = f.index_with(&mut s, &e, "fp-b", &["drafts/**"], None);
@@ -397,8 +457,17 @@ fn malformed_gitignore_line_is_an_error_and_well_formed_one_is_complete() {
         exclude: &[],
         chunk_max_tokens: 450,
         budget: None,
+        rebuild: false,
     };
-    let result = index_vault(f.vault.path(), &mut s, &e, "fp-a", &opts, &mut |_| {});
+    let result = index_vault(
+        f.vault.path(),
+        &mut s,
+        &mut f.cache(),
+        &e,
+        &fps("model-a", "fp-a"),
+        &opts,
+        &mut |_| {},
+    );
     assert!(result.is_err());
     assert!(paths(&s).is_empty());
     f.write(".gitignore", "private/\n");
@@ -439,8 +508,625 @@ fn malformed_parent_gitignore_is_an_error() {
         exclude: &[],
         chunk_max_tokens: 450,
         budget: None,
+        rebuild: false,
     };
-    let result = index_vault(&vault, &mut s, &e, "fp-a", &opts, &mut |_| {});
+    let result = index_vault(
+        &vault,
+        &mut s,
+        &mut EmbeddingCache::open(&notrieve::cache::cache_path(&data.path().join("index.db")))
+            .unwrap(),
+        &e,
+        &fps("model-a", "fp-a"),
+        &opts,
+        &mut |_| {},
+    );
     assert!(result.is_err());
     assert!(paths(&s).is_empty());
+}
+
+#[test]
+fn rebuild_reason_tells_a_model_change_from_a_settings_change() {
+    let f = Fixture::new();
+    f.write("a.md", "alpha\n");
+    let (mut s, e) = (f.store(), FakeEmbedder::new(8));
+    let first = f.run(&mut s, &e, &fps("model-a", "fp-a"), &[], None, false);
+    assert_eq!(first.rebuild_reason, Some(RebuildReason::NewIndex));
+    let settings = f.run(&mut s, &e, &fps("model-a", "fp-b"), &[], None, false);
+    assert_eq!(
+        settings.rebuild_reason,
+        Some(RebuildReason::SettingsChanged)
+    );
+    let model = f.run(&mut s, &e, &fps("model-b", "fp-c"), &[], None, false);
+    assert_eq!(model.rebuild_reason, Some(RebuildReason::ModelChanged));
+    let unchanged = f.run(&mut s, &e, &fps("model-b", "fp-c"), &[], None, false);
+    assert_eq!((unchanged.rebuilt, unchanged.rebuild_reason), (false, None));
+}
+
+#[test]
+fn explicit_rebuild_with_matching_fingerprints_is_reported_as_requested() {
+    let f = Fixture::new();
+    f.write("a.md", "alpha\n");
+    let (mut s, e) = (f.store(), FakeEmbedder::new(8));
+    f.index(&mut s, &e);
+    let r = f.run(&mut s, &e, &fps("model-a", "fp-a"), &[], None, true);
+    assert_eq!(
+        (r.rebuilt, r.rebuild_reason, r.indexed),
+        (true, Some(RebuildReason::Requested), 1)
+    );
+}
+
+#[test]
+fn rebuilding_is_announced_before_any_file_starts() {
+    let f = Fixture::new();
+    f.write("a.md", "alpha\n");
+    f.write("b.md", "beta\n");
+    let (mut s, e) = (f.store(), FakeEmbedder::new(8));
+    let opts = IndexOptions {
+        exclude: &[],
+        chunk_max_tokens: 450,
+        budget: None,
+        rebuild: false,
+    };
+    let mut events: Vec<String> = Vec::new();
+    index_vault(
+        f.vault.path(),
+        &mut s,
+        &mut f.cache(),
+        &e,
+        &fps("model-a", "fp-a"),
+        &opts,
+        &mut |event| {
+            events.push(match event {
+                IndexEvent::Rebuilding(reason) => format!("rebuild:{reason:?}"),
+                IndexEvent::File(p) => format!("file:{}", p.path),
+            })
+        },
+    )
+    .unwrap();
+    assert_eq!(events, ["rebuild:NewIndex", "file:a.md", "file:b.md"]);
+}
+
+#[test]
+fn invalid_exclude_with_an_explicit_rebuild_keeps_the_index() {
+    let f = Fixture::new();
+    f.write("a.md", "alpha\n");
+    let (mut s, e) = (f.store(), FakeEmbedder::new(8));
+    f.index(&mut s, &e);
+    let bad = vec!["[".to_string()];
+    let opts = IndexOptions {
+        exclude: &bad,
+        chunk_max_tokens: 450,
+        budget: None,
+        rebuild: true,
+    };
+    let result = index_vault(
+        f.vault.path(),
+        &mut s,
+        &mut f.cache(),
+        &e,
+        &fps("model-a", "fp-a"),
+        &opts,
+        &mut |_| {},
+    );
+    assert!(result.is_err());
+    assert_eq!(paths(&s), ["a.md"]);
+}
+
+/// Two sections long enough not to be merged (the fake embedder counts characters).
+const TWO_SECTIONS: &str = "# 医療費\n医療費控除の対象になる費用と領収書の保管方法をまとめておく。\n# 年金\n年金の受給額と手続きの時期を確認して、必要な書類をそろえる。\n";
+
+#[test]
+fn settings_change_rebuild_embeds_nothing_again() {
+    let f = Fixture::new();
+    f.write("a.md", TWO_SECTIONS);
+    f.write(
+        "b.md",
+        "# B\nbeta gamma delta epsilon zeta eta theta iota\n",
+    );
+    let (mut s, e) = (f.store(), FakeEmbedder::new(8));
+    f.run(&mut s, &e, &fps("model-a", "fp-a"), &[], None, false);
+    assert_eq!(s.stats().unwrap(), (2, 3));
+    let embedded = e.embedded_count();
+    let r = f.run(&mut s, &e, &fps("model-a", "fp-b"), &[], None, false);
+    assert_eq!(
+        (r.rebuild_reason, r.indexed),
+        (Some(RebuildReason::SettingsChanged), 2)
+    );
+    assert_eq!(e.embedded_count(), embedded);
+    assert_eq!(f.dangling_keys(&s), 0);
+}
+
+#[test]
+fn schema_change_rebuild_embeds_nothing_again() {
+    let f = Fixture::new();
+    f.write("a.md", TWO_SECTIONS);
+    let (mut s, e) = (f.store(), FakeEmbedder::new(8));
+    f.index(&mut s, &e);
+    s.conn()
+        .execute(
+            "UPDATE meta SET value = '1' WHERE key = 'schema_version'",
+            [],
+        )
+        .unwrap();
+    let embedded = e.embedded_count();
+    let r = f.index(&mut s, &e);
+    assert_eq!(
+        (r.rebuild_reason, r.indexed),
+        (Some(RebuildReason::SchemaChanged), 1)
+    );
+    assert_eq!(e.embedded_count(), embedded);
+}
+
+#[test]
+fn only_the_changed_chunk_is_embedded_again() {
+    let f = Fixture::new();
+    f.write("a.md", TWO_SECTIONS);
+    let (mut s, e) = (f.store(), FakeEmbedder::new(8));
+    f.index(&mut s, &e);
+    let before = e.embedded_count();
+    f.write("a.md", &TWO_SECTIONS.replace("必要な書類", "必要な証明書"));
+    let r = f.index(&mut s, &e);
+    assert_eq!(r.indexed, 1);
+    assert_eq!(e.embedded_count() - before, 1);
+}
+
+#[test]
+fn model_change_embeds_every_chunk_again() {
+    let f = Fixture::new();
+    f.write("a.md", TWO_SECTIONS);
+    f.write(
+        "b.md",
+        "# B\nbeta gamma delta epsilon zeta eta theta iota\n",
+    );
+    let (mut s, e) = (f.store(), FakeEmbedder::new(8));
+    f.index(&mut s, &e);
+    let before = e.embedded_count();
+    let r = f.run(&mut s, &e, &fps("model-b", "fp-b"), &[], None, false);
+    assert_eq!(r.rebuild_reason, Some(RebuildReason::ModelChanged));
+    assert_eq!(e.embedded_count() - before, 3);
+}
+
+#[test]
+fn unreferenced_vectors_are_removed_after_a_complete_run() {
+    let f = Fixture::new();
+    f.write("a.md", TWO_SECTIONS);
+    let (mut s, e) = (f.store(), FakeEmbedder::new(8));
+    f.index(&mut s, &e);
+    let old_keys = s.embedding_keys().unwrap();
+    f.write("a.md", &TWO_SECTIONS.replace("必要な書類", "必要な証明書"));
+    f.index(&mut s, &e);
+    assert_eq!(f.cache().entry_count().unwrap(), 2);
+    f.run(&mut s, &e, &fps("model-b", "fp-b"), &[], None, false);
+    let cache = f.cache();
+    assert_eq!(
+        cache.entry_count().unwrap(),
+        s.embedding_keys().unwrap().len()
+    );
+    for key in &old_keys {
+        assert!(!cache.contains(key).unwrap());
+    }
+}
+
+#[test]
+fn budget_stopped_rebuild_keeps_the_vectors_of_files_not_yet_reindexed() {
+    let f = Fixture::new();
+    f.write("a.md", "alpha\n");
+    f.write("b.md", "beta\n");
+    let (mut s, e) = (f.store(), FakeEmbedder::new(8));
+    f.index(&mut s, &e);
+    let stored = f.cache().entry_count().unwrap();
+    let r = f.run(
+        &mut s,
+        &e,
+        &fps("model-a", "fp-b"),
+        &[],
+        Some(Duration::ZERO),
+        false,
+    );
+    assert_eq!((r.rebuilt, r.indexed, r.remaining), (true, 0, 2));
+    assert_eq!(f.cache().entry_count().unwrap(), stored);
+    let embedded = e.embedded_count();
+    f.run(&mut s, &e, &fps("model-a", "fp-b"), &[], None, false);
+    assert_eq!(e.embedded_count(), embedded);
+}
+
+/// Returns one vector fewer than it is asked for.
+struct ShortEmbedder(FakeEmbedder);
+
+impl Embedder for ShortEmbedder {
+    fn model_id(&self) -> &str {
+        self.0.model_id()
+    }
+
+    fn dim(&self) -> usize {
+        self.0.dim()
+    }
+
+    fn embed_documents(&self, texts: &[String]) -> notrieve::Result<Vec<Vec<f32>>> {
+        let mut vectors = self.0.embed_documents(texts)?;
+        vectors.pop();
+        Ok(vectors)
+    }
+
+    fn embed_query(&self, text: &str) -> notrieve::Result<Vec<f32>> {
+        self.0.embed_query(text)
+    }
+
+    fn count_tokens(&self, text: &str) -> notrieve::Result<usize> {
+        self.0.count_tokens(text)
+    }
+}
+
+#[test]
+fn embedder_returning_too_few_vectors_skips_the_file_and_writes_no_index_rows() {
+    let f = Fixture::new();
+    f.write("a.md", TWO_SECTIONS);
+    let mut s = f.store();
+    let e = ShortEmbedder(FakeEmbedder::new(8));
+    let opts = IndexOptions {
+        exclude: &[],
+        chunk_max_tokens: 450,
+        budget: None,
+        rebuild: false,
+    };
+    let r = index_vault(
+        f.vault.path(),
+        &mut s,
+        &mut f.cache(),
+        &e,
+        &fps("model-a", "fp-a"),
+        &opts,
+        &mut |_| {},
+    )
+    .unwrap();
+    assert_eq!((r.indexed, r.skipped.len()), (0, 1));
+    assert!(
+        r.skipped[0].reason.contains("1 vectors for 2 texts"),
+        "{}",
+        r.skipped[0].reason
+    );
+    assert_eq!(s.stats().unwrap(), (0, 0));
+    assert_eq!(f.dangling_keys(&s), 0);
+}
+
+fn remove_cache_files(f: &Fixture) {
+    for suffix in ["", "-wal", "-shm"] {
+        let mut path = f.cache_path().into_os_string();
+        path.push(suffix);
+        let _ = fs::remove_file(path);
+    }
+}
+
+#[test]
+fn unreadable_cache_is_recreated_and_every_chunk_embedded_again() {
+    let f = Fixture::new();
+    f.write("a.md", TWO_SECTIONS);
+    let (mut s, e) = (f.store(), FakeEmbedder::new(8));
+    f.index(&mut s, &e);
+    remove_cache_files(&f);
+    fs::write(f.cache_path(), vec![b'x'; 4096]).unwrap();
+    let before = e.embedded_count();
+    let r = f.index(&mut s, &e);
+    assert_eq!(r.rebuild_reason, Some(RebuildReason::CacheReset));
+    assert_eq!(e.embedded_count() - before, 2);
+    assert_eq!(f.dangling_keys(&s), 0);
+}
+
+#[test]
+fn deleted_cache_is_recreated_and_every_chunk_embedded_again() {
+    let f = Fixture::new();
+    f.write("a.md", TWO_SECTIONS);
+    let (mut s, e) = (f.store(), FakeEmbedder::new(8));
+    f.index(&mut s, &e);
+    remove_cache_files(&f);
+    let before = e.embedded_count();
+    let r = f.index(&mut s, &e);
+    assert_eq!(r.rebuild_reason, Some(RebuildReason::CacheReset));
+    assert_eq!(e.embedded_count() - before, 2);
+    assert_eq!(f.dangling_keys(&s), 0);
+}
+
+#[test]
+fn failure_after_the_cache_write_leaves_no_dangling_key() {
+    let f = Fixture::new();
+    f.write("a.md", "alpha\n");
+    let (mut s, e) = (f.store(), FakeEmbedder::new(8));
+    f.index(&mut s, &e);
+    // index.db rejects the new chunk after its vector has been committed to the cache.
+    s.conn()
+        .execute_batch(
+            "CREATE TRIGGER reject BEFORE INSERT ON chunks WHEN NEW.body LIKE '%EXPLODE%'
+             BEGIN SELECT RAISE(ABORT, 'rejected'); END;",
+        )
+        .unwrap();
+    f.write("a.md", "alpha EXPLODE\n");
+    let opts = IndexOptions {
+        exclude: &[],
+        chunk_max_tokens: 450,
+        budget: None,
+        rebuild: false,
+    };
+    let err = index_vault(
+        f.vault.path(),
+        &mut s,
+        &mut f.cache(),
+        &e,
+        &fps("model-a", "fp-a"),
+        &opts,
+        &mut |_| {},
+    )
+    .unwrap_err();
+    assert!(matches!(err, Error::Sqlite(_)), "{err}");
+    assert_eq!(f.dangling_keys(&s), 0);
+    assert_eq!(f.cache().entry_count().unwrap(), 2);
+    s.conn().execute_batch("DROP TRIGGER reject;").unwrap();
+    let embedded = e.embedded_count();
+    f.index(&mut s, &e);
+    assert_eq!(e.embedded_count(), embedded);
+    assert_eq!(f.cache().entry_count().unwrap(), 1);
+}
+
+#[test]
+fn vectors_orphaned_by_a_failed_run_are_removed_even_when_nothing_is_reindexed() {
+    let f = Fixture::new();
+    f.write("a.md", "alpha\n");
+    let (mut s, e) = (f.store(), FakeEmbedder::new(8));
+    f.index(&mut s, &e);
+    s.conn()
+        .execute_batch(
+            "CREATE TRIGGER reject BEFORE INSERT ON chunks WHEN NEW.body LIKE '%EXPLODE%'
+             BEGIN SELECT RAISE(ABORT, 'rejected'); END;",
+        )
+        .unwrap();
+    f.write("a.md", "alpha EXPLODE\n");
+    let opts = IndexOptions {
+        exclude: &[],
+        chunk_max_tokens: 450,
+        budget: None,
+        rebuild: false,
+    };
+    let failed = index_vault(
+        f.vault.path(),
+        &mut s,
+        &mut f.cache(),
+        &e,
+        &fps("model-a", "fp-a"),
+        &opts,
+        &mut |_| {},
+    );
+    assert!(failed.is_err());
+    assert_eq!(f.cache().entry_count().unwrap(), 2);
+    // The note goes back to the indexed content, so the next run re-indexes nothing.
+    f.write("a.md", "alpha\n");
+    let r = f.index(&mut s, &e);
+    assert_eq!((r.indexed, r.rebuilt), (0, false));
+    assert_eq!(f.cache().entry_count().unwrap(), 1);
+    assert_eq!(f.dangling_keys(&s), 0);
+}
+
+#[test]
+fn cache_recreated_before_a_failed_run_is_still_rebuilt_by_the_next_run() {
+    let f = Fixture::new();
+    f.write("a.md", TWO_SECTIONS);
+    let (mut s, e) = (f.store(), FakeEmbedder::new(8));
+    f.index(&mut s, &e);
+    remove_cache_files(&f);
+    // This run creates the new cache, then fails on the exclude rule before it can rebuild.
+    let bad = vec!["[".to_string()];
+    let opts = IndexOptions {
+        exclude: &bad,
+        chunk_max_tokens: 450,
+        budget: None,
+        rebuild: false,
+    };
+    let failed = index_vault(
+        f.vault.path(),
+        &mut s,
+        &mut f.cache(),
+        &e,
+        &fps("model-a", "fp-a"),
+        &opts,
+        &mut |_| {},
+    );
+    assert!(failed.is_err());
+    assert!(f.cache_path().exists());
+    let before = e.embedded_count();
+    let r = f.index(&mut s, &e);
+    assert_eq!(r.rebuild_reason, Some(RebuildReason::CacheReset));
+    assert_eq!(e.embedded_count() - before, 2);
+    assert_eq!(f.dangling_keys(&s), 0);
+}
+
+#[test]
+fn dimension_change_stores_vectors_of_the_new_dimension() {
+    let f = Fixture::new();
+    f.write("a.md", "alpha\n");
+    let mut s = f.store();
+    f.run(
+        &mut s,
+        &FakeEmbedder::new(8),
+        &fps("model-a", "fp-a"),
+        &[],
+        None,
+        false,
+    );
+    f.run(
+        &mut s,
+        &FakeEmbedder::new(16),
+        &fps("model-b", "fp-b"),
+        &[],
+        None,
+        false,
+    );
+    let lengths: Vec<i64> = f
+        .cache()
+        .conn()
+        .prepare("SELECT length(vector) FROM embeddings")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(lengths, [64]);
+}
+
+fn skipped_paths(r: &IndexReport) -> Vec<(&str, &str)> {
+    r.skipped
+        .iter()
+        .map(|s| (s.path.as_str(), s.reason.as_str()))
+        .collect()
+}
+
+#[test]
+fn unchanged_skipped_file_is_not_retried_but_stays_in_the_report() {
+    let f = Fixture::new();
+    f.write("ok.md", "fine\n");
+    f.write("bad.md", "contains BOOM\n");
+    fs::write(f.path("latin1.md"), [0xff, 0xfe, 0x00]).unwrap();
+    let (mut s, e) = (f.store(), FakeEmbedder::new(8).failing_on("BOOM"));
+    let first = f.index(&mut s, &e);
+    assert_eq!(first.skipped.len(), 2);
+    let opts = IndexOptions {
+        exclude: &[],
+        chunk_max_tokens: 450,
+        budget: None,
+        rebuild: false,
+    };
+    let mut attempted: Vec<String> = Vec::new();
+    let second = index_vault(
+        f.vault.path(),
+        &mut s,
+        &mut f.cache(),
+        &e,
+        &fps("model-a", "fp-a"),
+        &opts,
+        &mut |ev| {
+            if let IndexEvent::File(p) = ev {
+                attempted.push(p.path.to_string());
+            }
+        },
+    )
+    .unwrap();
+    assert_eq!(attempted, Vec::<String>::new());
+    assert_eq!(second.indexed, 0);
+    assert_eq!(second.skipped, first.skipped);
+    assert_eq!(
+        second
+            .skipped
+            .iter()
+            .map(|s| s.path.as_str())
+            .collect::<Vec<_>>(),
+        ["bad.md", "latin1.md"]
+    );
+    assert!(second.skipped[0].reason.contains("BOOM"));
+}
+
+#[test]
+fn deleted_skipped_file_leaves_the_report_and_the_table() {
+    let f = Fixture::new();
+    f.write("ok.md", "fine\n");
+    fs::write(f.path("latin1.md"), [0xff, 0xfe, 0x00]).unwrap();
+    let (mut s, e) = (f.store(), FakeEmbedder::new(8));
+    assert_eq!(f.index(&mut s, &e).skipped.len(), 1);
+    fs::remove_file(f.path("latin1.md")).unwrap();
+    let r = f.index(&mut s, &e);
+    assert_eq!(skipped_paths(&r), []);
+    assert!(s.skipped_states().unwrap().is_empty());
+}
+
+#[test]
+fn rebuild_retries_skipped_files() {
+    let f = Fixture::new();
+    f.write("bad.md", "contains BOOM\n");
+    let mut s = f.store();
+    let failing = FakeEmbedder::new(8).failing_on("BOOM");
+    assert_eq!(f.index(&mut s, &failing).skipped.len(), 1);
+    // Only a rebuild may re-attempt it: the file is unchanged on disk.
+    let working = FakeEmbedder::new(8);
+    let r = f.run(&mut s, &working, &fps("model-a", "fp-a"), &[], None, true);
+    assert_eq!((r.indexed, r.skipped.len()), (1, 0));
+    assert_eq!(paths(&s), ["bad.md"]);
+    assert!(s.skipped_states().unwrap().is_empty());
+}
+
+#[test]
+fn changed_skipped_file_is_retried_and_its_row_removed() {
+    let f = Fixture::new();
+    f.write("ok.md", "fine\n");
+    fs::write(f.path("bad.md"), [0xff, 0xfe, 0x00]).unwrap();
+    let (mut s, e) = (f.store(), FakeEmbedder::new(8));
+    f.index(&mut s, &e);
+    f.write("bad.md", "now valid text\n");
+    let r = f.index(&mut s, &e);
+    assert_eq!((r.indexed, r.skipped.len()), (1, 0));
+    assert!(s.skipped_states().unwrap().is_empty());
+}
+
+#[test]
+fn schema_rebuild_clears_skipped_rows() {
+    let f = Fixture::new();
+    fs::write(f.path("bad.md"), [0xff, 0xfe, 0x00]).unwrap();
+    let (mut s, e) = (f.store(), FakeEmbedder::new(8));
+    f.index(&mut s, &e);
+    assert_eq!(s.skipped_states().unwrap().len(), 1);
+    s.rebuild(&fps("model-a", "fp-a"), "fake", 8).unwrap();
+    assert!(s.skipped_states().unwrap().is_empty());
+}
+
+#[test]
+fn previously_indexed_file_that_becomes_unindexable_loses_its_index_rows() {
+    let f = Fixture::new();
+    f.write("a.md", "uniqueoldword here\n");
+    f.write("ok.md", "fine\n");
+    let (mut s, e) = (f.store(), FakeEmbedder::new(8));
+    f.index(&mut s, &e);
+    fs::write(f.path("a.md"), [0xff, 0xfe, 0x00]).unwrap();
+    let r = f.index(&mut s, &e);
+    assert_eq!(
+        skipped_paths(&r).iter().map(|p| p.0).collect::<Vec<_>>(),
+        ["a.md"]
+    );
+    assert_eq!(paths(&s), ["ok.md"]);
+    let hits: i64 = s
+        .conn()
+        .query_row(
+            "SELECT count(*) FROM chunks_fts WHERE chunks_fts MATCH '\"uniqueoldword\"'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(hits, 0);
+    assert_eq!(s.stats().unwrap().0, 1);
+}
+
+#[test]
+fn stored_skips_stay_in_the_report_when_the_run_is_stopped_by_the_budget() {
+    let f = Fixture::new();
+    f.write("ok.md", "fine\n");
+    fs::write(f.path("bad.md"), [0xff, 0xfe, 0x00]).unwrap();
+    let (mut s, e) = (f.store(), FakeEmbedder::new(8));
+    f.index(&mut s, &e);
+    fs::remove_file(f.path("bad.md")).unwrap();
+    f.write("new.md", "gamma\n");
+    let r = f.index_with(&mut s, &e, "fp-a", &[], Some(Duration::ZERO));
+    assert_eq!(r.remaining, 1);
+    assert_eq!(
+        skipped_paths(&r).iter().map(|p| p.0).collect::<Vec<_>>(),
+        ["bad.md"]
+    );
+}
+
+#[test]
+fn refailure_of_a_changed_skipped_file_overwrites_the_stored_state() {
+    let f = Fixture::new();
+    f.write("bad.md", "contains BOOM\n");
+    let (mut s, e) = (f.store(), FakeEmbedder::new(8).failing_on("BOOM"));
+    f.index(&mut s, &e);
+    let before = s.skipped_states().unwrap()["bad.md"].clone();
+    fs::write(f.path("bad.md"), [0xff, 0xfe, 0x00, 0x01]).unwrap();
+    f.index(&mut s, &e);
+    let after = s.skipped_states().unwrap()["bad.md"].clone();
+    assert_eq!(after.size, 4);
+    assert_ne!(after.size, before.size);
+    assert_ne!(after.reason, before.reason);
 }

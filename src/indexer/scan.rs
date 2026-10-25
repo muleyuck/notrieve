@@ -6,7 +6,7 @@ use ignore::WalkBuilder;
 use ignore::overrides::OverrideBuilder;
 
 use crate::config::CONFIG_DIR;
-use crate::store::FileState;
+use crate::store::{FileState, SkippedState};
 use crate::{Error, Result};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -113,11 +113,18 @@ pub fn scan_vault(root: &Path, exclude: &[String]) -> Result<Scan> {
     Ok(scan)
 }
 
-pub fn plan_changes(scan: &Scan, states: &HashMap<String, FileState>) -> ChangePlan {
+pub fn plan_changes(
+    scan: &Scan,
+    states: &HashMap<String, FileState>,
+    skipped: &HashMap<String, SkippedState>,
+) -> ChangePlan {
     let candidates = scan
         .entries
         .iter()
         .filter(|e| {
+            if let Some(s) = skipped.get(&e.rel) {
+                return s.mtime_ns != e.mtime_ns || s.size != e.size;
+            }
             states
                 .get(&e.rel)
                 .is_none_or(|s| s.mtime_ns != e.mtime_ns || s.size != e.size)
@@ -163,8 +170,92 @@ fn is_rule_error(err: &ignore::Error) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::is_rule_error;
+    use super::{Scan, ScanEntry, is_rule_error, plan_changes};
+    use crate::store::SkippedState;
     use ignore::Error as E;
+    use std::collections::HashMap;
+
+    fn scan_of(size: i64) -> Scan {
+        Scan {
+            entries: vec![ScanEntry {
+                rel: "bad.md".into(),
+                abs: "bad.md".into(),
+                mtime_ns: 10,
+                size,
+            }],
+            complete: true,
+            errors: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn skipped_file_is_a_candidate_only_when_mtime_or_size_changed() {
+        let skipped = HashMap::from([(
+            "bad.md".to_string(),
+            SkippedState {
+                mtime_ns: 10,
+                size: 3,
+                reason: "x".into(),
+            },
+        )]);
+        let no_states = HashMap::new();
+        let no_skipped = HashMap::new();
+        assert_eq!(
+            plan_changes(&scan_of(3), &no_states, &skipped).stale_files(),
+            0
+        );
+        assert_eq!(
+            plan_changes(&scan_of(4), &no_states, &skipped).stale_files(),
+            1
+        );
+        assert_eq!(
+            plan_changes(&scan_of(3), &no_states, &no_skipped).stale_files(),
+            1
+        );
+    }
+
+    #[test]
+    fn skipped_row_decides_alone_even_when_the_files_row_matches() {
+        use crate::store::FileState;
+        let states = HashMap::from([(
+            "bad.md".to_string(),
+            FileState {
+                mtime_ns: 10,
+                size: 3,
+                content_hash: "h".into(),
+                title: "bad".into(),
+            },
+        )]);
+        let skipped = HashMap::from([(
+            "bad.md".to_string(),
+            SkippedState {
+                mtime_ns: 20,
+                size: 4,
+                reason: "x".into(),
+            },
+        )]);
+        assert_eq!(
+            plan_changes(&scan_of(3), &states, &skipped).stale_files(),
+            1
+        );
+    }
+
+    #[test]
+    fn skipped_file_with_only_a_new_mtime_is_a_candidate() {
+        let skipped = HashMap::from([(
+            "bad.md".to_string(),
+            SkippedState {
+                mtime_ns: 99,
+                size: 3,
+                reason: "x".into(),
+            },
+        )]);
+        let no_states = HashMap::new();
+        assert_eq!(
+            plan_changes(&scan_of(3), &no_states, &skipped).stale_files(),
+            1
+        );
+    }
 
     #[test]
     fn glob_errors_are_rule_errors_even_when_wrapped() {

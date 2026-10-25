@@ -1,13 +1,17 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Once;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use std::fmt;
+
 use rusqlite::{Connection, ErrorCode, OptionalExtension, Transaction, params};
 
+use crate::cache::EmbeddingKey;
+use crate::fingerprint::Fingerprints;
 use crate::{Error, Result};
 
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 3;
 
 const SCHEMA_SQL: &str = include_str!("schema.sql");
 
@@ -30,7 +34,7 @@ pub struct ChunkRecord {
     pub start_line: usize,
     pub end_line: usize,
     pub body: String,
-    pub embedding: Vec<f32>,
+    pub embedding_key: EmbeddingKey,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,6 +43,50 @@ pub struct FileState {
     pub size: i64,
     pub content_hash: String,
     pub title: String,
+}
+
+/// A file `index_vault` could not index, with the mtime and size it was seen at.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkippedState {
+    pub mtime_ns: i64,
+    pub size: i64,
+    pub reason: String,
+}
+
+/// Why `index_vault` rebuilds the index; shown to the user (spec §4.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RebuildReason {
+    NewIndex,
+    Requested,
+    SchemaChanged,
+    ModelChanged,
+    SettingsChanged,
+    /// The embedding cache was missing, unreadable, of another version, or not the one the index
+    /// was built against.
+    CacheReset,
+}
+
+impl fmt::Display for RebuildReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            RebuildReason::NewIndex => "building a new index",
+            RebuildReason::Requested => {
+                "rebuilding the index as requested (unchanged chunks reuse their embeddings)"
+            }
+            RebuildReason::SchemaChanged => {
+                "rebuilding the index because notrieve was updated (unchanged chunks reuse their embeddings)"
+            }
+            RebuildReason::ModelChanged => {
+                "rebuilding the index because the model changed; every chunk is embedded again"
+            }
+            RebuildReason::SettingsChanged => {
+                "rebuilding the index because notrieve or the chunk settings changed (unchanged chunks reuse their embeddings)"
+            }
+            RebuildReason::CacheReset => {
+                "rebuilding the index because the embedding cache was missing or unreadable; every chunk is embedded again"
+            }
+        })
+    }
 }
 
 pub struct Store {
@@ -61,10 +109,6 @@ fn register_sqlite_vec() {
             sqlite_vec::sqlite3_vec_init as *const ()
         )));
     });
-}
-
-pub fn f32_blob(vector: &[f32]) -> Vec<u8> {
-    vector.iter().flat_map(|x| x.to_le_bytes()).collect()
 }
 
 impl Store {
@@ -156,12 +200,33 @@ impl Store {
             || self.fingerprint()?.as_deref() != Some(fingerprint))
     }
 
-    pub fn rebuild(&mut self, fingerprint: &str, model_id: &str, dim: usize) -> Result<()> {
+    /// `None` when the index matches the schema and both fingerprints.
+    pub fn rebuild_reason(&self, fps: &Fingerprints) -> Result<Option<RebuildReason>> {
+        let Some(version) = self.schema_version()? else {
+            return Ok(Some(RebuildReason::NewIndex));
+        };
+        if self
+            .meta("model_fingerprint")?
+            .is_some_and(|stored| stored != fps.model)
+        {
+            return Ok(Some(RebuildReason::ModelChanged));
+        }
+        if version != SCHEMA_VERSION {
+            return Ok(Some(RebuildReason::SchemaChanged));
+        }
+        if self.fingerprint()?.as_deref() != Some(fps.index.as_str()) {
+            return Ok(Some(RebuildReason::SettingsChanged));
+        }
+        Ok(None)
+    }
+
+    pub fn rebuild(&mut self, fps: &Fingerprints, model_id: &str, dim: usize) -> Result<()> {
         let tx = self.conn.transaction()?;
-        tx.execute_batch(&SCHEMA_SQL.replace("{dim}", &dim.to_string()))?;
+        tx.execute_batch(SCHEMA_SQL)?;
         let entries = [
             ("schema_version", SCHEMA_VERSION.to_string()),
-            ("index_fingerprint", fingerprint.to_string()),
+            ("index_fingerprint", fps.index.clone()),
+            ("model_fingerprint", fps.model.clone()),
             ("model_id", model_id.to_string()),
             ("dim", dim.to_string()),
         ];
@@ -200,8 +265,8 @@ impl Store {
         let file_id = tx.last_insert_rowid();
         for tag in &file.tags {
             tx.execute(
-                "INSERT INTO file_tags(file_id, tag) VALUES (?1, ?2)",
-                params![file_id, tag],
+                "INSERT INTO file_tags(file_id, tag, tag_key) VALUES (?1, ?2, ?3)",
+                params![file_id, tag, tag.to_lowercase()],
             )?;
         }
         let fts_title = std::iter::once(file.title.as_str())
@@ -210,25 +275,22 @@ impl Store {
             .join("\n");
         for c in chunks {
             tx.execute(
-                "INSERT INTO chunks(file_id, ord, heading_path, start_line, end_line, body)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                "INSERT INTO chunks(file_id, ord, heading_path, start_line, end_line, body, embedding_key)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 params![
                     file_id,
                     c.ord as i64,
                     c.heading_path,
                     c.start_line as i64,
                     c.end_line as i64,
-                    c.body
+                    c.body,
+                    c.embedding_key
                 ],
             )?;
             let id = tx.last_insert_rowid();
             tx.execute(
                 "INSERT INTO chunks_fts(rowid, title, heading_path, body) VALUES (?1, ?2, ?3, ?4)",
                 params![id, fts_title, c.heading_path, c.body],
-            )?;
-            tx.execute(
-                "INSERT INTO chunks_vec(rowid, embedding) VALUES (?1, ?2)",
-                params![id, f32_blob(&c.embedding)],
             )?;
         }
         tx.commit()?;
@@ -248,6 +310,7 @@ impl Store {
             "UPDATE files SET mtime_ns = ?2, size = ?3 WHERE path = ?1",
             params![path, mtime_ns, size],
         )?;
+        tx.execute("DELETE FROM skipped_files WHERE path = ?1", [path])?;
         tx.commit()?;
         Ok(())
     }
@@ -266,6 +329,7 @@ impl Store {
             "UPDATE files SET path = ?2, mtime_ns = ?3, size = ?4 WHERE path = ?1",
             params![from, to, mtime_ns, size],
         )?;
+        tx.execute("DELETE FROM skipped_files WHERE path = ?1", [to])?;
         tx.commit()?;
         Ok(())
     }
@@ -276,6 +340,67 @@ impl Store {
         delete_rows(&tx, path)?;
         tx.commit()?;
         Ok(())
+    }
+
+    /// Records a file that could not be indexed, so it is not retried until its mtime or size changes.
+    pub fn skip_file(
+        &mut self,
+        fingerprint: &str,
+        path: &str,
+        mtime_ns: i64,
+        size: i64,
+        reason: &str,
+    ) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        check_fingerprint(&tx, fingerprint)?;
+        // The old content must not stay searchable once the file cannot be indexed.
+        delete_rows(&tx, path)?;
+        tx.execute(
+            "INSERT OR REPLACE INTO skipped_files(path, mtime_ns, size, reason)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![path, mtime_ns, size, reason],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Removes the skipped rows of paths that are no longer in the vault.
+    pub fn retain_skipped(&mut self, fingerprint: &str, present: &HashSet<&str>) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        check_fingerprint(&tx, fingerprint)?;
+        let stale: Vec<String> = {
+            let mut stmt = tx.prepare("SELECT path FROM skipped_files")?;
+            stmt.query_map([], |r| r.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+                .into_iter()
+                .filter(|p| !present.contains(p.as_str()))
+                .collect()
+        };
+        for path in stale {
+            tx.execute("DELETE FROM skipped_files WHERE path = ?1", [path])?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn skipped_states(&self) -> Result<HashMap<String, SkippedState>> {
+        if !self.has_table("skipped_files")? {
+            return Ok(HashMap::new());
+        }
+        let mut stmt = self
+            .conn
+            .prepare("SELECT path, mtime_ns, size, reason FROM skipped_files")?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                SkippedState {
+                    mtime_ns: r.get(1)?,
+                    size: r.get(2)?,
+                    reason: r.get(3)?,
+                },
+            ))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     pub fn file_states(&self) -> Result<HashMap<String, FileState>> {
@@ -297,6 +422,45 @@ impl Store {
             ))
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Keys of every chunk's vector in the embedding cache.
+    pub fn embedding_keys(&self) -> Result<HashSet<EmbeddingKey>> {
+        if !self.has_table("chunks")? {
+            return Ok(HashSet::new());
+        }
+        let mut stmt = self.conn.prepare("SELECT embedding_key FROM chunks")?;
+        let keys = stmt
+            .query_map([], |r| r.get::<_, EmbeddingKey>(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(keys)
+    }
+
+    /// `embedding_keys().len()` without loading the keys.
+    pub fn distinct_key_count(&self) -> Result<usize> {
+        if !self.has_table("chunks")? {
+            return Ok(0);
+        }
+        let n: i64 = self.conn.query_row(
+            "SELECT count(DISTINCT embedding_key) FROM chunks",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok(n as usize)
+    }
+
+    /// The embedding cache the index rows were written against (`EmbeddingCache::id`).
+    pub fn cache_id(&self) -> Result<Option<String>> {
+        self.meta("cache_id")
+    }
+
+    /// Records the cache after a rebuild; a rebuild drops the meta table, so it is recorded again.
+    pub fn bind_cache(&mut self, cache_id: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES ('cache_id', ?1)",
+            [cache_id],
+        )?;
+        Ok(())
     }
 
     /// (files, chunks)
@@ -334,16 +498,16 @@ fn delete_rows(tx: &Transaction, path: &str) -> Result<()> {
         stmt.query_map([path], |r| r.get(0))?
             .collect::<rusqlite::Result<_>>()?
     };
-    // chunks_fts and chunks_vec are not covered by the foreign-key cascade.
+    // chunks_fts is not covered by the foreign-key cascade.
     for id in ids {
         tx.execute("DELETE FROM chunks_fts WHERE rowid = ?1", [id])?;
-        tx.execute("DELETE FROM chunks_vec WHERE rowid = ?1", [id])?;
     }
     tx.execute("DELETE FROM files WHERE path = ?1", [path])?;
+    tx.execute("DELETE FROM skipped_files WHERE path = ?1", [path])?;
     Ok(())
 }
 
-fn classify(error: rusqlite::Error, path: &Path) -> Error {
+pub(crate) fn classify(error: rusqlite::Error, path: &Path) -> Error {
     match error.sqlite_error_code() {
         Some(ErrorCode::NotADatabase | ErrorCode::DatabaseCorrupt) => {
             Error::DbCorrupt(path.to_path_buf())
@@ -352,7 +516,7 @@ fn classify(error: rusqlite::Error, path: &Path) -> Error {
     }
 }
 
-fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
+pub(crate) fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
     let mut s = path.as_os_str().to_os_string();
     s.push(suffix);
     PathBuf::from(s)
@@ -406,14 +570,14 @@ mod tests {
         }
     }
 
-    fn chunk(ord: usize, body: &str, dim: usize) -> ChunkRecord {
+    fn chunk(ord: usize, body: &str) -> ChunkRecord {
         ChunkRecord {
             ord,
             heading_path: "確定申告 > 医療費".into(),
             start_line: 3 + ord,
             end_line: 7 + ord,
             body: body.into(),
-            embedding: (0..dim).map(|i| (i + ord) as f32 / 10.0).collect(),
+            embedding_key: *blake3::hash(body.as_bytes()).as_bytes(),
         }
     }
 
@@ -424,9 +588,16 @@ mod tests {
             .unwrap()
     }
 
+    fn fps(index: &str) -> Fingerprints {
+        Fingerprints {
+            model: "model-a".into(),
+            index: index.into(),
+        }
+    }
+
     fn rebuilt(dir: &TempDir, fp: &str, dim: usize) -> Store {
         let mut s = Store::open(&dir.path().join("index.db")).unwrap();
-        s.rebuild(fp, "fake", dim).unwrap();
+        s.rebuild(&fps(fp), "fake", dim).unwrap();
         s
     }
 
@@ -465,17 +636,25 @@ mod tests {
         s.write_file(
             "fp-a",
             &file("a.md"),
-            &[chunk(0, "医療費控除", 4), chunk(1, "領収書", 4)],
+            &[chunk(0, "医療費控除"), chunk(1, "領収書")],
         )
         .unwrap();
         assert_eq!(s.stats().unwrap(), (1, 2));
+        assert_eq!((count(&s, "chunks_fts"), count(&s, "file_tags")), (2, 2));
+        let keys: Vec<EmbeddingKey> = s
+            .conn()
+            .prepare("SELECT embedding_key FROM chunks ORDER BY ord")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(|k| k.unwrap())
+            .collect();
         assert_eq!(
-            (
-                count(&s, "chunks_fts"),
-                count(&s, "chunks_vec"),
-                count(&s, "file_tags")
-            ),
-            (2, 2, 2)
+            keys,
+            [
+                chunk(0, "医療費控除").embedding_key,
+                chunk(1, "領収書").embedding_key
+            ]
         );
     }
 
@@ -483,35 +662,21 @@ mod tests {
     fn rewriting_a_file_leaves_no_orphan_rows() {
         let dir = TempDir::new().unwrap();
         let mut s = rebuilt(&dir, "fp-a", 4);
-        let three = [chunk(0, "a", 4), chunk(1, "b", 4), chunk(2, "c", 4)];
+        let three = [chunk(0, "a"), chunk(1, "b"), chunk(2, "c")];
         s.write_file("fp-a", &file("a.md"), &three).unwrap();
-        s.write_file("fp-a", &file("a.md"), &[chunk(0, "d", 4)])
+        s.write_file("fp-a", &file("a.md"), &[chunk(0, "d")])
             .unwrap();
-        assert_eq!(
-            (
-                count(&s, "chunks"),
-                count(&s, "chunks_fts"),
-                count(&s, "chunks_vec")
-            ),
-            (1, 1, 1)
-        );
+        assert_eq!((count(&s, "chunks"), count(&s, "chunks_fts")), (1, 1));
     }
 
     #[test]
     fn delete_removes_search_rows() {
         let dir = TempDir::new().unwrap();
         let mut s = rebuilt(&dir, "fp-a", 4);
-        s.write_file("fp-a", &file("a.md"), &[chunk(0, "a", 4)])
+        s.write_file("fp-a", &file("a.md"), &[chunk(0, "a")])
             .unwrap();
         s.delete_file("fp-a", "a.md").unwrap();
-        assert_eq!(
-            (
-                count(&s, "files"),
-                count(&s, "chunks_fts"),
-                count(&s, "chunks_vec")
-            ),
-            (0, 0, 0)
-        );
+        assert_eq!((count(&s, "files"), count(&s, "chunks_fts")), (0, 0));
     }
 
     #[test]
@@ -519,7 +684,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let mut s = rebuilt(&dir, "fp-a", 4);
         let err = s
-            .write_file("fp-b", &file("a.md"), &[chunk(0, "a", 4)])
+            .write_file("fp-b", &file("a.md"), &[chunk(0, "a")])
             .unwrap_err();
         assert!(matches!(err, Error::FingerprintChanged));
         assert_eq!(count(&s, "files"), 0);
@@ -529,7 +694,7 @@ mod tests {
     fn rename_keeps_chunk_rows() {
         let dir = TempDir::new().unwrap();
         let mut s = rebuilt(&dir, "fp-a", 4);
-        s.write_file("fp-a", &file("a.md"), &[chunk(0, "a", 4)])
+        s.write_file("fp-a", &file("a.md"), &[chunk(0, "a")])
             .unwrap();
         let before: i64 = s
             .conn()
@@ -550,7 +715,7 @@ mod tests {
     fn touch_updates_only_mtime_and_size() {
         let dir = TempDir::new().unwrap();
         let mut s = rebuilt(&dir, "fp-a", 4);
-        s.write_file("fp-a", &file("a.md"), &[chunk(0, "a", 4)])
+        s.write_file("fp-a", &file("a.md"), &[chunk(0, "a")])
             .unwrap();
         s.touch_file("fp-a", "a.md", 99, 400).unwrap();
         let st = &s.file_states().unwrap()["a.md"];
@@ -561,22 +726,37 @@ mod tests {
     }
 
     #[test]
-    fn rebuild_with_a_new_dimension_recreates_the_vector_table() {
+    fn rebuild_drops_the_vector_table_of_schema_1() {
         let dir = TempDir::new().unwrap();
         let mut s = rebuilt(&dir, "fp-a", 4);
-        s.write_file("fp-a", &file("a.md"), &[chunk(0, "a", 4)])
+        s.conn()
+            .execute_batch("CREATE VIRTUAL TABLE chunks_vec USING vec0(embedding float[4]);")
             .unwrap();
-        s.rebuild("fp-b", "fake", 8).unwrap();
-        assert_eq!(count(&s, "files"), 0);
-        s.write_file("fp-b", &file("a.md"), &[chunk(0, "a", 8)])
-            .unwrap();
-        let len: i64 = s
+        s.rebuild(&fps("fp-b"), "fake", 4).unwrap();
+        let n: i64 = s
             .conn()
-            .query_row("SELECT vec_length(embedding) FROM chunks_vec", [], |r| {
-                r.get(0)
-            })
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE name = 'chunks_vec'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
-        assert_eq!(len, 8);
+        assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn embedding_keys_lists_the_key_of_every_chunk() {
+        let dir = TempDir::new().unwrap();
+        let mut s = rebuilt(&dir, "fp-a", 4);
+        s.write_file("fp-a", &file("a.md"), &[chunk(0, "a"), chunk(1, "b")])
+            .unwrap();
+        s.write_file("fp-a", &file("b.md"), &[chunk(0, "c")])
+            .unwrap();
+        let expected: HashSet<EmbeddingKey> = ["a", "b", "c"]
+            .iter()
+            .map(|body| chunk(0, body).embedding_key)
+            .collect();
+        assert_eq!(s.embedding_keys().unwrap(), expected);
     }
 
     #[test]
@@ -597,7 +777,7 @@ mod tests {
         ));
         let (mut s, moved) = Store::open_for_rebuild(&path).unwrap();
         assert_eq!(moved, None);
-        s.rebuild("fp-a", "fake", 4).unwrap();
+        s.rebuild(&fps("fp-a"), "fake", 4).unwrap();
         assert!(!s.needs_rebuild("fp-a").unwrap());
     }
 
@@ -643,7 +823,7 @@ mod tests {
                 .to_string_lossy()
                 .contains("index.db.corrupt-")
         );
-        s.rebuild("fp-a", "fake", 4).unwrap();
+        s.rebuild(&fps("fp-a"), "fake", 4).unwrap();
         assert!(!s.needs_rebuild("fp-a").unwrap());
     }
 
@@ -659,18 +839,20 @@ mod tests {
     fn failure_midway_through_a_file_keeps_its_previous_rows_in_every_table() {
         let dir = TempDir::new().unwrap();
         let mut s = rebuilt(&dir, "fp-a", 4);
-        s.write_file("fp-a", &file("a.md"), &[chunk(0, "old body", 4)])
+        s.write_file("fp-a", &file("a.md"), &[chunk(0, "old body")])
+            .unwrap();
+        // Rejects the second chunk, so the insert fails after earlier rows of the file were written.
+        s.conn()
+            .execute_batch(
+                "CREATE TRIGGER reject_bad BEFORE INSERT ON chunks WHEN NEW.body = 'bad'
+                 BEGIN SELECT RAISE(ABORT, 'rejected'); END;",
+            )
             .unwrap();
         let mut newer = file("a.md");
         newer.content_hash = "new-hash".into();
         newer.tags = vec!["changed".into()];
-        // The second vector has the wrong dimension, so the insert fails after earlier rows were written.
         let err = s
-            .write_file(
-                "fp-a",
-                &newer,
-                &[chunk(5, "new body", 4), chunk(6, "bad", 3)],
-            )
+            .write_file("fp-a", &newer, &[chunk(5, "new body"), chunk(6, "bad")])
             .unwrap_err();
         assert!(matches!(err, Error::Sqlite(_)), "{err}");
         assert_eq!(
@@ -686,29 +868,20 @@ mod tests {
             .map(|row| row.unwrap())
             .collect();
         assert_eq!(tags, ["inbox/todo", "税金"]);
-        let body: String = s
+        let (body, key): (String, EmbeddingKey) = s
             .conn()
-            .query_row("SELECT body FROM chunks", [], |r| r.get(0))
+            .query_row("SELECT body, embedding_key FROM chunks", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
             .unwrap();
         assert_eq!(body, "old body");
+        assert_eq!(key, chunk(0, "old body").embedding_key);
         let fts: String = s
             .conn()
             .query_row("SELECT body FROM chunks_fts", [], |r| r.get(0))
             .unwrap();
         assert_eq!(fts, "old body");
-        let vector: Vec<u8> = s
-            .conn()
-            .query_row("SELECT embedding FROM chunks_vec", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(vector, f32_blob(&chunk(0, "old body", 4).embedding));
-        assert_eq!(
-            (
-                count(&s, "chunks"),
-                count(&s, "chunks_fts"),
-                count(&s, "chunks_vec")
-            ),
-            (1, 1, 1)
-        );
+        assert_eq!((count(&s, "chunks"), count(&s, "chunks_fts")), (1, 1));
     }
 
     #[test]
@@ -721,7 +894,7 @@ mod tests {
         let moved = moved.unwrap();
         assert!(moved.to_string_lossy().contains("index.db.corrupt-"));
         assert_eq!(std::fs::read(&moved).unwrap(), vec![b'x'; 4096]);
-        s.rebuild("fp-a", "fake", 4).unwrap();
+        s.rebuild(&fps("fp-a"), "fake", 4).unwrap();
         assert!(!s.needs_rebuild("fp-a").unwrap());
     }
 
@@ -750,5 +923,74 @@ mod tests {
         .unwrap();
         let third = quarantine_at(&path, 1000).unwrap();
         assert_eq!(third, dir.path().join("index.db.corrupt-1000-3"));
+    }
+
+    #[test]
+    fn fresh_database_is_a_new_index() {
+        let dir = TempDir::new().unwrap();
+        let s = Store::open(&dir.path().join("index.db")).unwrap();
+        assert_eq!(
+            s.rebuild_reason(&fps("fp-a")).unwrap(),
+            Some(RebuildReason::NewIndex)
+        );
+    }
+
+    #[test]
+    fn matching_fingerprints_need_no_rebuild() {
+        let dir = TempDir::new().unwrap();
+        let s = rebuilt(&dir, "fp-a", 4);
+        assert_eq!(s.rebuild_reason(&fps("fp-a")).unwrap(), None);
+    }
+
+    #[test]
+    fn other_index_fingerprint_with_the_same_model_is_a_settings_change() {
+        let dir = TempDir::new().unwrap();
+        let s = rebuilt(&dir, "fp-a", 4);
+        assert_eq!(
+            s.rebuild_reason(&fps("fp-b")).unwrap(),
+            Some(RebuildReason::SettingsChanged)
+        );
+    }
+
+    #[test]
+    fn model_change_wins_over_an_old_schema_and_an_old_schema_alone_is_a_schema_change() {
+        let dir = TempDir::new().unwrap();
+        let s = rebuilt(&dir, "fp-a", 4);
+        s.conn()
+            .execute(
+                "UPDATE meta SET value = '0' WHERE key = 'schema_version'",
+                [],
+            )
+            .unwrap();
+        let other_model = Fingerprints {
+            model: "model-b".into(),
+            index: "fp-a".into(),
+        };
+        assert_eq!(
+            s.rebuild_reason(&other_model).unwrap(),
+            Some(RebuildReason::ModelChanged)
+        );
+        assert_eq!(
+            s.rebuild_reason(&fps("fp-a")).unwrap(),
+            Some(RebuildReason::SchemaChanged)
+        );
+    }
+
+    #[test]
+    fn index_without_a_recorded_model_fingerprint_reports_a_settings_change() {
+        // Indexes written by plan 1 have no model_fingerprint row.
+        let dir = TempDir::new().unwrap();
+        let s = rebuilt(&dir, "fp-a", 4);
+        s.conn()
+            .execute("DELETE FROM meta WHERE key = 'model_fingerprint'", [])
+            .unwrap();
+        let other_model = Fingerprints {
+            model: "model-b".into(),
+            index: "fp-b".into(),
+        };
+        assert_eq!(
+            s.rebuild_reason(&other_model).unwrap(),
+            Some(RebuildReason::SettingsChanged)
+        );
     }
 }
