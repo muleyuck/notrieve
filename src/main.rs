@@ -103,7 +103,7 @@ enum ModelCommand {
 
 #[derive(Subcommand)]
 enum VaultCommand {
-    /// Register a directory that already has .notrieve/
+    /// Register a directory that already has .notrieve/, or approve its changed config again
     Add {
         path: PathBuf,
         /// Name in the vault registry (default: the directory name)

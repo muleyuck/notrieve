@@ -114,6 +114,65 @@ fn adding_a_vault_shows_where_it_sends_notes() {
 }
 
 #[test]
+fn a_config_changed_after_registration_needs_adding_again() {
+    let env = Env::new();
+    let root = env.vault("team");
+    env.run(env.home.path(), &["vault", "add", root.to_str().unwrap()]);
+    fs::write(root.join(".notrieve/config.toml"), REMOTE_CONFIG).unwrap();
+    let refused = env.run(&root, &["model", "pull"]);
+    assert_eq!(refused.status.code(), Some(1));
+    assert!(
+        stderr(&refused).contains("changed since"),
+        "{}",
+        stderr(&refused)
+    );
+    let again = env.run(
+        env.home.path(),
+        &["vault", "add", root.to_str().unwrap(), "--name", "team"],
+    );
+    assert!(again.status.success(), "{}", stderr(&again));
+    assert!(
+        stdout(&again).contains("api.example.com"),
+        "{}",
+        stdout(&again)
+    );
+    let pulled = env.run(&root, &["model", "pull"]);
+    assert!(pulled.status.success(), "{}", stderr(&pulled));
+}
+
+#[test]
+fn adding_again_under_a_second_name_approves_the_change_and_can_make_it_default() {
+    let env = Env::new();
+    let root = env.vault("team");
+    let path = root.to_str().unwrap();
+    for name in ["a", "b"] {
+        let out = env.run(env.home.path(), &["vault", "add", path, "--name", name]);
+        assert!(out.status.success(), "{name}: {}", stderr(&out));
+    }
+    let before = stdout(&env.run(env.home.path(), &["vault", "list"]));
+    assert!(
+        before
+            .lines()
+            .any(|l| l.starts_with("a\t") && l.ends_with("\tdefault")),
+        "{before}"
+    );
+    fs::write(root.join(".notrieve/config.toml"), REMOTE_CONFIG).unwrap();
+    let again = env.run(
+        env.home.path(),
+        &["vault", "add", path, "--name", "b", "--default"],
+    );
+    assert!(again.status.success(), "{}", stderr(&again));
+    let list = stdout(&env.run(env.home.path(), &["vault", "list"]));
+    assert!(
+        list.lines()
+            .any(|l| l.starts_with("b\t") && l.ends_with("\tdefault")),
+        "{list}"
+    );
+    let pulled = env.run(env.home.path(), &["model", "pull", "--vault", "b"]);
+    assert!(pulled.status.success(), "{}", stderr(&pulled));
+}
+
+#[test]
 fn search_in_an_unregistered_vault_with_a_remote_model_asks_to_register_it() {
     let env = Env::new();
     let root = env.vault("team");

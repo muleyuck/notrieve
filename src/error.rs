@@ -23,6 +23,21 @@ pub enum Error {
         .root.display()
     )]
     UntrustedVault { root: PathBuf, settings: String },
+    #[error(
+        "{} is a symbolic link; notrieve writes its index, lock and cache only as regular files, so remove the link",
+        .0.display()
+    )]
+    IndexFileLinked(PathBuf),
+    #[error(
+        "the config of vault `{name}` changed since you registered it: it now {settings}; check {}/.notrieve/config.toml and run `notrieve vault add {} --name {name}` if you trust it",
+        .root.display(),
+        .root.display()
+    )]
+    VaultConfigChanged {
+        name: String,
+        root: PathBuf,
+        settings: String,
+    },
     #[error("configuration error: {0}")]
     Config(String),
     #[error("another notrieve process is updating the index")]
