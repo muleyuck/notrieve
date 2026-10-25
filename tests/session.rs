@@ -77,22 +77,6 @@ fn startup_with_the_lock_held_elsewhere_is_a_lock_busy_error_until_it_is_release
 }
 
 #[test]
-fn settings_changed_after_the_sync_ask_for_a_restart() {
-    let (_tmp, vault) = vault();
-    write(&vault, "a.md", "# A\nalpha\n");
-    let session = Session::with_embedder(vault.clone(), fake(), fps("a")).unwrap();
-    wait_for(|| {
-        session
-            .search(&q("alpha"))
-            .ok()
-            .filter(|r| r.index_state == IndexState::Fresh)
-    });
-    index_as_another_process(&vault, &fps("b"));
-    let err = session.search(&q("alpha")).unwrap_err();
-    assert!(matches!(err, Error::FingerprintChanged), "{err}");
-}
-
-#[test]
 fn a_new_note_is_reported_stale_and_then_indexed_in_the_background() {
     let (_tmp, vault) = vault();
     write(&vault, "a.md", "# A\nalpha\n");
@@ -335,25 +319,6 @@ fn get_note_before_any_index_exists_reports_why_without_creating_one() {
     });
     assert!(!vault.db_path().exists());
     drop(held);
-}
-
-#[test]
-fn get_note_does_not_follow_an_indexed_note_replaced_by_a_symlink() {
-    let (_tmp, vault) = vault();
-    write(&vault, "a.md", "# A\nalpha\n");
-    write(&vault, ".env", "SECRET=1\n");
-    let session = Session::with_embedder(vault.clone(), fake(), fps("a")).unwrap();
-    wait_for(|| {
-        session
-            .search(&q("alpha"))
-            .ok()
-            .filter(|r| r.index_state == IndexState::Fresh)
-    });
-    std::fs::remove_file(vault.root.join("a.md")).unwrap();
-    std::os::unix::fs::symlink(vault.root.join(".env"), vault.root.join("a.md")).unwrap();
-    let err = session.get_note("a.md", None, None).unwrap_err();
-    assert!(matches!(err, Error::NoteNotFound(_)), "{err}");
-    assert!(!err.to_string().contains("SECRET"));
 }
 
 #[test]

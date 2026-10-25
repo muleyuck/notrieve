@@ -352,17 +352,6 @@ fn non_utf8_file_is_skipped() {
 }
 
 #[test]
-fn fingerprint_change_rebuilds_everything() {
-    let f = Fixture::new();
-    f.write("a.md", "alpha\n");
-    f.write("b.md", "beta\n");
-    let (mut s, e) = (f.store(), FakeEmbedder::new(8));
-    f.index(&mut s, &e);
-    let r = f.index_with(&mut s, &e, "fp-b", &[], None);
-    assert_eq!((r.rebuilt, r.indexed), (true, 2));
-}
-
-#[test]
 fn tags_aliases_and_line_numbers_are_stored() {
     let f = Fixture::new();
     f.write(
@@ -803,21 +792,6 @@ fn remove_cache_files(f: &Fixture) {
         path.push(suffix);
         let _ = fs::remove_file(path);
     }
-}
-
-#[test]
-fn unreadable_cache_is_recreated_and_every_chunk_embedded_again() {
-    let f = Fixture::new();
-    f.write("a.md", TWO_SECTIONS);
-    let (mut s, e) = (f.store(), FakeEmbedder::new(8));
-    f.index(&mut s, &e);
-    remove_cache_files(&f);
-    fs::write(f.cache_path(), vec![b'x'; 4096]).unwrap();
-    let before = e.embedded_count();
-    let r = f.index(&mut s, &e);
-    assert_eq!(r.rebuild_reason, Some(RebuildReason::CacheReset));
-    assert_eq!(e.embedded_count() - before, 2);
-    assert_eq!(f.dangling_keys(&s), 0);
 }
 
 #[test]

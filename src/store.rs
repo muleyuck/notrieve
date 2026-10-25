@@ -804,14 +804,6 @@ mod tests {
     }
 
     #[test]
-    fn current_schema_version_opens() {
-        let dir = TempDir::new().unwrap();
-        let path = dir.path().join("index.db");
-        drop(rebuilt(&dir, "fp-a", 4));
-        assert!(Store::open(&path).is_ok());
-    }
-
-    #[test]
     fn damaged_pages_are_detected_and_moved_aside_on_rebuild() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("index.db");

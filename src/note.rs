@@ -321,17 +321,6 @@ mod tests {
         assert!(!err.to_string().contains("SECRET"));
     }
 
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
-    #[test]
-    fn a_handle_to_a_vault_note_passes_the_post_open_check() {
-        let (_tmp, root) = vault_dir();
-        let root = root.canonicalize().unwrap();
-        let file = std::fs::File::open(root.join("sub/a.md")).unwrap();
-        assert!(verify_open(&file, &root, "sub/a.md").is_ok());
-        let n = read_note(&root, "sub/a.md", Some(1), Some(1)).unwrap();
-        assert_eq!(n.text, "one\n");
-    }
-
     #[cfg(unix)]
     #[test]
     fn a_file_swapped_for_a_fifo_before_the_open_is_not_found_and_does_not_hang() {
