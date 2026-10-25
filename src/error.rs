@@ -48,6 +48,22 @@ pub enum Error {
     IndexNotReady,
     #[error("{0} is not valid UTF-8")]
     NotUtf8(String),
+    #[error("`{0}` is outside the vault")]
+    OutsideVault(String),
+    #[error("no note at `{0}` in the vault")]
+    NoteNotFound(String),
+    #[error("`{0}` is not an indexed note; pass a path from the search results")]
+    NoteNotIndexed(String),
+    #[error("invalid line range: {0}")]
+    InvalidLineRange(String),
+    /// A background indexer failure; the message is complete (it names the indexer).
+    #[error("{0}")]
+    IndexerFailed(String),
+    #[error(
+        "the index is being rebuilt{}; search again shortly",
+        .remaining.map(|n| format!(" ({n} files left)")).unwrap_or_default()
+    )]
+    Rebuilding { remaining: Option<usize> },
     #[error("{path}: {source}")]
     Io {
         path: PathBuf,

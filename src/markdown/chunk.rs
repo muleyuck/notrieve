@@ -93,6 +93,23 @@ pub fn chunk_note<C: TokenCount + ?Sized>(
         .collect()
 }
 
+/// Byte offsets where each line starts. A line ends at `\n`, at a lone `\r`, or at `\r\n` (one
+/// break). `get_note` numbers lines with this too, so hit line numbers address the same lines.
+pub(crate) fn line_starts(text: &str) -> Vec<usize> {
+    let mut starts = Vec::new();
+    if !text.is_empty() {
+        starts.push(0);
+        let bytes = text.as_bytes();
+        for (i, &b) in bytes.iter().enumerate() {
+            let breaks = b == b'\n' || (b == b'\r' && bytes.get(i + 1) != Some(&b'\n'));
+            if breaks && i + 1 < text.len() {
+                starts.push(i + 1);
+            }
+        }
+    }
+    starts
+}
+
 struct Lines<'a> {
     text: &'a str,
     starts: Vec<usize>,
@@ -100,18 +117,10 @@ struct Lines<'a> {
 
 impl<'a> Lines<'a> {
     fn new(text: &'a str) -> Self {
-        let mut starts = Vec::new();
-        if !text.is_empty() {
-            starts.push(0);
-            let bytes = text.as_bytes();
-            for (i, &b) in bytes.iter().enumerate() {
-                let breaks = b == b'\n' || (b == b'\r' && bytes.get(i + 1) != Some(&b'\n'));
-                if breaks && i + 1 < text.len() {
-                    starts.push(i + 1);
-                }
-            }
+        Self {
+            text,
+            starts: line_starts(text),
         }
-        Self { text, starts }
     }
 
     fn len(&self) -> usize {

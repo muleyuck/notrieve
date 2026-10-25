@@ -4,6 +4,8 @@ use std::process::{Command, Output};
 
 use tempfile::TempDir;
 
+mod support;
+
 struct Env {
     home: TempDir,
 }
@@ -15,16 +17,20 @@ impl Env {
         }
     }
 
-    fn run(&self, cwd: &Path, args: &[&str]) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_notrieve"))
+    fn command(&self, cwd: &Path, args: &[&str]) -> Command {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_notrieve"));
+        command
             .args(args)
             .current_dir(cwd)
             .env("HOME", self.home.path())
             .env("XDG_CONFIG_HOME", self.home.path().join("config"))
             .env("XDG_CACHE_HOME", self.home.path().join("cache"))
-            .env_remove("NOTRIEVE_LOG")
-            .output()
-            .unwrap()
+            .env_remove("NOTRIEVE_LOG");
+        command
+    }
+
+    fn run(&self, cwd: &Path, args: &[&str]) -> Output {
+        self.command(cwd, args).output().unwrap()
     }
 
     fn dir(&self, name: &str) -> PathBuf {
@@ -238,4 +244,22 @@ fn blank_search_query_fails_before_the_model_is_downloaded() {
         stderr(&out)
     );
     assert!(!env.home.path().join("cache/notrieve").exists());
+}
+
+#[test]
+fn mcp_outside_any_vault_answers_tools_with_the_vault_error_and_keeps_stdout_to_json_rpc() {
+    let env = Env::new();
+    let dir = env.dir("plain");
+    let (lines, status) = support::mcp_search_session(env.command(&dir, &["mcp"]), "anything");
+    assert!(status.success(), "{status}");
+    assert!(lines.iter().all(|l| l["jsonrpc"] == "2.0"), "{lines:?}");
+    assert_eq!(lines[0]["id"], 1);
+    let result = &lines.last().unwrap()["result"];
+    assert_eq!(result["isError"], true, "{result}");
+    let message = result["content"][0]["text"].as_str().unwrap();
+    assert!(message.contains("no vault found"), "{message}");
+    assert!(
+        !env.home.path().join("cache/notrieve/models").exists(),
+        "no model was fetched"
+    );
 }
