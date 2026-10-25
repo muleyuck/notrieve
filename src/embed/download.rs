@@ -3,7 +3,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use super::onnx::required_files;
-use crate::config::{ModelContract, ModelSource};
+use crate::config::{ModelSource, OnnxContract};
 use crate::{Error, Result, lock};
 
 const COMPLETE_MARKER: &str = ".complete";
@@ -15,7 +15,7 @@ pub enum DownloadEvent<'a> {
     Finished { file: &'a str },
 }
 
-pub fn model_dir(contract: &ModelContract, cache_root: &Path) -> PathBuf {
+pub fn model_dir(contract: &OnnxContract, cache_root: &Path) -> PathBuf {
     match &contract.source {
         ModelSource::Hf { repo } => cache_root.join(repo.replace('/', "__")),
         ModelSource::Path { dir } => dir.clone(),
@@ -23,7 +23,7 @@ pub fn model_dir(contract: &ModelContract, cache_root: &Path) -> PathBuf {
 }
 
 pub fn ensure_model(
-    contract: &ModelContract,
+    contract: &OnnxContract,
     cache_root: &Path,
     force: bool,
     on_event: &mut dyn FnMut(DownloadEvent<'_>),
@@ -33,7 +33,7 @@ pub fn ensure_model(
 
 pub fn ensure_model_from(
     base_url: &str,
-    contract: &ModelContract,
+    contract: &OnnxContract,
     cache_root: &Path,
     force: bool,
     on_event: &mut dyn FnMut(DownloadEvent<'_>),
@@ -46,7 +46,7 @@ pub fn ensure_model_from(
 /// Ensures the model files and runs `f` on them while the cache lock is still held, so a
 /// concurrent `model pull --force` cannot replace files between loading and fingerprinting.
 pub fn with_model<T>(
-    contract: &ModelContract,
+    contract: &OnnxContract,
     cache_root: &Path,
     force: bool,
     on_event: &mut dyn FnMut(DownloadEvent<'_>),
@@ -57,7 +57,7 @@ pub fn with_model<T>(
 
 pub fn with_model_from<T>(
     base_url: &str,
-    contract: &ModelContract,
+    contract: &OnnxContract,
     cache_root: &Path,
     force: bool,
     on_event: &mut dyn FnMut(DownloadEvent<'_>),
@@ -90,7 +90,7 @@ pub fn with_model_from<T>(
 fn refresh_locked(
     base_url: &str,
     repo: &str,
-    contract: &ModelContract,
+    contract: &OnnxContract,
     dir: &Path,
     force: bool,
     on_event: &mut dyn FnMut(DownloadEvent<'_>),
@@ -195,8 +195,8 @@ mod tests {
     use std::thread;
     use tempfile::TempDir;
 
-    fn contract(source: ModelSource) -> ModelContract {
-        ModelContract {
+    fn contract(source: ModelSource) -> OnnxContract {
+        OnnxContract {
             id: "m".into(),
             source,
             onnx_file: "onnx/model.onnx".into(),
@@ -288,7 +288,7 @@ mod tests {
             .collect()
     }
 
-    fn hf() -> ModelContract {
+    fn hf() -> OnnxContract {
         contract(ModelSource::Hf {
             repo: "owner/repo".into(),
         })

@@ -49,6 +49,7 @@ impl Fixture {
             exclude: &[],
             chunk_max_tokens: 450,
             budget: None,
+            deadline: None,
             rebuild: false,
         };
         let fps = Fingerprints {
@@ -70,7 +71,7 @@ impl Fixture {
 
     fn search(&self, query: &SearchQuery) -> Result<Vec<Hit>> {
         let reader = open_reader(&self.db()).unwrap();
-        search(&reader, &*self.embedder, FP, query)
+        search(&reader, &*self.embedder, FP, query, None).map(|found| found.hits)
     }
 
     fn query(&self, text: &str) -> Vec<Hit> {
@@ -459,7 +460,8 @@ fn other_index_fingerprint_or_a_missing_cache_is_index_not_ready() {
             &reader,
             &*f.embedder,
             "fp-other",
-            &SearchQuery::new("alpha")
+            &SearchQuery::new("alpha"),
+            None
         ),
         Err(Error::IndexNotReady)
     ));
@@ -531,7 +533,9 @@ fn a_commit_from_another_connection_during_the_search_is_not_seen() {
         inner: &*f.embedder,
         db: f.db(),
     };
-    let during = search(&reader, &deleting, FP, &SearchQuery::new("議事録")).unwrap();
+    let during = search(&reader, &deleting, FP, &SearchQuery::new("議事録"), None)
+        .unwrap()
+        .hits;
     assert_eq!(fts_paths(&during), ["a.md"]);
     let after = f.query("議事録");
     assert!(after.iter().all(|h| h.path != "a.md"));

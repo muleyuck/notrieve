@@ -4,13 +4,15 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use notrieve::app::{self, Event, IndexRequest, Paths};
+use notrieve::app::{self, Event, IndexRequest, Paths, PullOutcome};
 use notrieve::embed::download::DownloadEvent;
 use notrieve::indexer::IndexReport;
 use notrieve::mcp::{self, NotrieveServer};
 use notrieve::search::{DEFAULT_K, MAX_K, SearchQuery, SearchResponse};
 use notrieve::session::Session;
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::filter::filter_fn;
+use tracing_subscriber::prelude::*;
 
 #[derive(Parser)]
 #[command(
@@ -33,6 +35,9 @@ enum Command {
         /// Make this the default vault (the first registered vault always is)
         #[arg(long)]
         default: bool,
+        /// Stop after writing the settings: no model download and no index
+        #[arg(long)]
+        no_index: bool,
     },
     /// Update the index
     Index {
@@ -115,10 +120,22 @@ enum VaultCommand {
 }
 
 fn main() -> ExitCode {
-    let filter = EnvFilter::try_from_env("NOTRIEVE_LOG").unwrap_or_else(|_| EnvFilter::new("warn"));
-    tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        .with_env_filter(filter)
+    let user_filter =
+        EnvFilter::try_from_env("NOTRIEVE_LOG").unwrap_or_else(|_| EnvFilter::new("warn"));
+    // ureq prints some request header values at debug level and ureq-proto the whole request at
+    // trace level, so an API key can reach either. A directive cannot cap them (a longer target in
+    // NOTRIEVE_LOG wins), so a second filter keeps only their info and above whatever the first
+    // allows.
+    let cap_ureq = filter_fn(|meta| {
+        !(meta.target().starts_with("ureq") && *meta.level() > tracing::Level::INFO)
+    });
+    tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(std::io::stderr)
+                .with_filter(user_filter)
+                .with_filter(cap_ureq),
+        )
         .init();
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
@@ -158,19 +175,30 @@ fn run(cli: Cli) -> Result<()> {
     let paths = Paths::from_env()?;
     let cwd = std::env::current_dir().context("cannot read the current directory")?;
     match cli.command {
-        Command::Init { name, default } => {
+        Command::Init {
+            name,
+            default,
+            no_index,
+        } => {
             let vault = app::init(&cwd, name.as_deref(), default, &paths)?;
             println!(
                 "initialized vault `{}` at {}",
                 vault.name.as_deref().unwrap_or_default(),
                 vault.root.display()
             );
-            let request = IndexRequest {
-                rebuild: false,
-                wait: true,
-                budget: None,
-            };
-            print_report(&app::index(&vault, &paths, &request, &mut print_event)?);
+            if no_index {
+                println!(
+                    "edit {} and then run `notrieve index`",
+                    vault.config_dir().join("config.toml").display()
+                );
+            } else {
+                let request = IndexRequest {
+                    rebuild: false,
+                    wait: true,
+                    budget: None,
+                };
+                print_report(&app::index(&vault, &paths, &request, &mut print_event)?);
+            }
         }
         Command::Index {
             vault,
@@ -200,11 +228,19 @@ fn run(cli: Cli) -> Result<()> {
                 tags,
                 path_prefix: path,
             };
-            let response = app::search(&vault, &paths, &query, &mut print_event)?;
+            let response = app::search(&vault, &paths, &query, &mut |event| {
+                if !matches!(event, Event::SendingToRemote(_)) {
+                    print_event(event)
+                }
+            })?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&response)?);
             } else {
                 print_results(&response);
+                // `--json` carries both in the JSON (remote spec §5.2).
+                for notice in search_notices(&response) {
+                    eprintln!("{notice}");
+                }
             }
             // On stderr in both formats, so stdout stays the results alone (spec §5.3).
             if let Some(notice) = stale_notice(&response) {
@@ -236,8 +272,12 @@ fn run(cli: Cli) -> Result<()> {
             command: ModelCommand::Pull { vault, force },
         } => {
             let vault = app::open_vault(vault.as_deref(), &cwd, &paths)?;
-            let dir = app::pull_model(&vault, &paths, force, &mut print_event)?;
-            println!("model files are in {}", dir.display());
+            match app::pull_model(&vault, &paths, force, &mut print_event)? {
+                PullOutcome::Downloaded(dir) => println!("model files are in {}", dir.display()),
+                PullOutcome::Remote { host } => {
+                    println!("model is remote ({host}); nothing to download")
+                }
+            }
         }
         Command::Vault { command } => match command {
             VaultCommand::Add {
@@ -291,10 +331,20 @@ fn print_event(event: Event<'_>) {
         Event::Download(DownloadEvent::Finished { .. }) => {}
         Event::Rebuilding(reason) => eprintln!("{reason}"),
         Event::Indexing(p) => eprintln!("[{}/{}] {}", p.done + 1, p.total, p.path),
+        Event::SendingToRemote(host) => eprintln!("sending note text to {host} for embedding"),
         Event::CorruptDbMoved(path) => {
             eprintln!("moved the unreadable database to {}", path.display())
         }
     }
+}
+
+fn stopped_notice(report: &IndexReport) -> Option<String> {
+    report.interrupted.as_ref().map(|reason| {
+        format!(
+            "stopped: {reason}; {} file(s) left for the next run",
+            report.remaining
+        )
+    })
 }
 
 fn print_report(report: &IndexReport) {
@@ -309,7 +359,9 @@ fn print_report(report: &IndexReport) {
     for skipped in &report.skipped {
         println!("skipped {}: {}", skipped.path, skipped.reason);
     }
-    if report.remaining > 0 {
+    if let Some(notice) = stopped_notice(report) {
+        eprintln!("{notice}");
+    } else if report.remaining > 0 {
         println!("{} file(s) left for the next run", report.remaining);
     }
     if !report.scan_complete {
@@ -342,6 +394,19 @@ fn print_results(response: &SearchResponse) {
     }
 }
 
+fn search_notices(response: &SearchResponse) -> Vec<String> {
+    let mut notices = Vec::new();
+    if let Some(error) = &response.indexer_error {
+        notices.push(format!("the index was not updated: {error}"));
+    }
+    if let Some(reason) = &response.vector_error {
+        notices.push(format!(
+            "semantic search is unavailable ({reason}); showing full-text matches only"
+        ));
+    }
+    notices
+}
+
 fn stale_notice(response: &SearchResponse) -> Option<String> {
     (response.stale_files > 0).then(|| {
         format!(
@@ -355,7 +420,23 @@ fn stale_notice(response: &SearchResponse) -> Option<String> {
 #[cfg(test)]
 mod search_output_tests {
     use super::*;
-    use notrieve::search::IndexState;
+    use notrieve::search::{IndexState, VectorSearch};
+
+    #[test]
+    fn stopped_notice_names_the_reason_and_the_files_left() {
+        let report = IndexReport {
+            remaining: 4,
+            interrupted: Some("HTTP 503 from https://api.example.com/v1/embeddings".into()),
+            ..IndexReport::default()
+        };
+        assert_eq!(
+            stopped_notice(&report).as_deref(),
+            Some(
+                "stopped: HTTP 503 from https://api.example.com/v1/embeddings; 4 file(s) left for the next run"
+            )
+        );
+        assert_eq!(stopped_notice(&IndexReport::default()), None);
+    }
 
     fn response(stale_files: usize, index_state: IndexState) -> SearchResponse {
         SearchResponse {
@@ -363,7 +444,39 @@ mod search_output_tests {
             stale_files,
             index_state,
             indexer_error: None,
+            vector_search: VectorSearch::Ok,
+            vector_error: None,
         }
+    }
+
+    #[test]
+    fn a_failed_update_is_noticed() {
+        let response = SearchResponse {
+            indexer_error: Some("embedding API error: HTTP 401".into()),
+            ..response(0, IndexState::Fresh)
+        };
+        assert_eq!(
+            search_notices(&response),
+            ["the index was not updated: embedding API error: HTTP 401"]
+        );
+    }
+
+    #[test]
+    fn a_missing_vector_side_is_noticed() {
+        let response = SearchResponse {
+            vector_search: VectorSearch::Unavailable,
+            vector_error: Some("HTTP 503".into()),
+            ..response(0, IndexState::Fresh)
+        };
+        assert_eq!(
+            search_notices(&response),
+            ["semantic search is unavailable (HTTP 503); showing full-text matches only"]
+        );
+    }
+
+    #[test]
+    fn a_complete_search_has_no_notice() {
+        assert!(search_notices(&response(0, IndexState::Fresh)).is_empty());
     }
 
     #[test]

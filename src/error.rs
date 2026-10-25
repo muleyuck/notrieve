@@ -30,6 +30,12 @@ pub enum Error {
     Download { url: String, message: String },
     #[error("embedding failed: {0}")]
     Embedding(String),
+    /// A failed call to a remote embedding API. `message` never contains the API key.
+    #[error("embedding API error: {message}")]
+    Remote {
+        kind: RemoteErrorKind,
+        message: String,
+    },
     #[error("database error: {0}")]
     Sqlite(#[from] rusqlite::Error),
     #[error(
@@ -81,4 +87,18 @@ impl Error {
             source,
         }
     }
+}
+
+/// How a remote embedding failure is handled (remote spec §5.1, §6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoteErrorKind {
+    /// Worth trying again later: no connection, a timeout, 408, 429 or 5xx.
+    Transient,
+    /// 401 or 403, or no API key in the environment.
+    Auth,
+    /// The server refused this input (another 4xx).
+    Input,
+    /// The endpoint or its answers are wrong: 3xx, 404, 405, an invalid response, or vectors of
+    /// another dimension than the index.
+    Protocol,
 }

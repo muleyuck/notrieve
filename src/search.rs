@@ -2,6 +2,7 @@
 //! cache for vectors, fused with reciprocal rank fusion.
 use std::collections::HashMap;
 use std::path::Path;
+use std::time::Instant;
 
 use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension, params_from_iter};
@@ -9,6 +10,7 @@ use serde::Serialize;
 
 use crate::cache::{cache_path, f32_blob};
 use crate::embed::Embedder;
+use crate::error::RemoteErrorKind;
 use crate::store::Store;
 use crate::{Error, Result};
 
@@ -91,15 +93,46 @@ impl IndexState {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VectorSearch {
+    Ok,
+    /// The query could not be embedded; the results come from full-text search alone.
+    Unavailable,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct SearchResponse {
     pub results: Vec<Hit>,
     /// Changes found by the light scan just before the search (spec §4.2).
     pub stale_files: usize,
     pub index_state: IndexState,
-    /// The last failure of a background indexer (MCP).
+    /// The last failure of a background indexer (MCP), or of the update before a CLI search.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub indexer_error: Option<String>,
+    /// Remote spec §5.2: a remote API that is down, slow or without its key leaves full-text
+    /// search.
+    pub vector_search: VectorSearch,
+    /// Why `vector_search` is `unavailable`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vector_error: Option<String>,
+}
+
+/// What `search` found, and why the vector side was left out when it was.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SearchResults {
+    pub hits: Vec<Hit>,
+    pub vector_error: Option<String>,
+}
+
+impl SearchResults {
+    pub fn vector_search(&self) -> VectorSearch {
+        if self.vector_error.is_some() {
+            VectorSearch::Unavailable
+        } else {
+            VectorSearch::Ok
+        }
+    }
 }
 
 /// Opens the index for searching, with its embedding cache attached as `cache`.
@@ -119,12 +152,14 @@ pub fn open_reader(db_path: &Path) -> Result<Store> {
 }
 
 /// `store` must come from `open_reader`; `fingerprint` is this process's index fingerprint.
+/// `deadline` bounds embedding the query with a remote model.
 pub fn search<E: Embedder + ?Sized>(
     store: &Store,
     embedder: &E,
     fingerprint: &str,
     query: &SearchQuery,
-) -> Result<Vec<Hit>> {
+    deadline: Option<Instant>,
+) -> Result<SearchResults> {
     query.validate()?;
     let text = query.text.trim();
     // One read transaction over both files (spec §4.5). SQLite pins each WAL file's snapshot at its
@@ -137,17 +172,54 @@ pub fn search<E: Embedder + ?Sized>(
     if stored_fingerprint(&tx)?.as_deref() != Some(fingerprint) {
         return Err(Error::IndexNotReady);
     }
-    let vector = embedder.embed_query(text)?;
+    let (vector, vector_error) = match embedder.embed_query_within(text, deadline) {
+        Ok(vector) => (Some(vector), None),
+        Err(Error::Remote {
+            kind: RemoteErrorKind::Transient | RemoteErrorKind::Auth,
+            message,
+        }) => (None, Some(message)),
+        Err(e) => return Err(e),
+    };
+    if let Some(vector) = &vector
+        && embedder.is_remote()
+    {
+        check_query_dim(&tx, vector.len())?;
+    }
     let filter = Filter::new(query);
     let fts = fts_ranking(&tx, text, &filter)?;
-    let vec = vector_ranking(&tx, &vector, &filter)?;
+    let vec = match &vector {
+        Some(vector) => vector_ranking(&tx, vector, &filter)?,
+        None => Vec::new(),
+    };
     let hits = rrf(&fts, &vec)
         .into_iter()
         .take(query.k)
         .map(|fused| load_hit(&tx, &fused))
         .collect::<Result<Vec<_>>>()?;
     tx.commit()?;
-    Ok(hits)
+    Ok(SearchResults { hits, vector_error })
+}
+
+/// Remote spec §4: the query vector must have the index's dimension. Checked here, so the
+/// mismatch is a `Protocol` error rather than one from `vec_distance_cosine`.
+fn check_query_dim(conn: &Connection, dim: usize) -> Result<()> {
+    let stored: Option<i64> = conn
+        .query_row(
+            "SELECT length(e.vector) / 4 FROM chunks c
+             JOIN cache.embeddings e ON e.key = c.embedding_key LIMIT 1",
+            [],
+            |r| r.get(0),
+        )
+        .optional()?;
+    match stored {
+        Some(stored) if stored as usize != dim => Err(Error::Remote {
+            kind: RemoteErrorKind::Protocol,
+            message: format!(
+                "the API returned a {dim}-dimensional query vector but the index holds {stored}-dimensional ones; set a new model.id to rebuild the index with this model"
+            ),
+        }),
+        _ => Ok(()),
+    }
 }
 
 fn stored_fingerprint(conn: &Connection) -> Result<Option<String>> {
@@ -379,11 +451,15 @@ mod tests {
             stale_files: 3,
             index_state: IndexState::UpdatingElsewhere,
             indexer_error: None,
+            vector_search: VectorSearch::Ok,
+            vector_error: None,
         };
         let v = serde_json::to_value(&response).unwrap();
         assert_eq!(v["index_state"], "updating_elsewhere");
         assert_eq!(v["stale_files"], 3);
+        assert_eq!(v["vector_search"], "ok");
         assert!(v.get("indexer_error").is_none());
+        assert!(v.get("vector_error").is_none());
         let first = &v["results"][0];
         for key in [
             "path",
@@ -407,6 +483,19 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&failed).unwrap()["indexer_error"],
             "boom"
+        );
+        let degraded = SearchResponse {
+            vector_search: VectorSearch::Unavailable,
+            vector_error: Some("down".into()),
+            ..failed
+        };
+        let v = serde_json::to_value(&degraded).unwrap();
+        assert_eq!(
+            (&v["vector_search"], &v["vector_error"]),
+            (
+                &serde_json::json!("unavailable"),
+                &serde_json::json!("down")
+            )
         );
     }
 

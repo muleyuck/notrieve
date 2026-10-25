@@ -1,6 +1,7 @@
 //! A long-running session over one vault: the model stays loaded and a background thread keeps the
 //! index current (spec §4.6, §5.4). The MCP server calls only this API.
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use crate::app::{self, Event, Paths};
 use crate::config::Vault;
@@ -13,6 +14,9 @@ use crate::search::{self, IndexState, SearchQuery, SearchResponse};
 use crate::store::Store;
 use crate::{Error, Result};
 use rusqlite::OptionalExtension;
+
+/// MCP has no `search_budget_ms`; a remote query gets this long (remote spec §5.3; a guess).
+pub const MCP_QUERY_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub struct Session {
     vault: Vault,
@@ -27,7 +31,7 @@ impl Session {
     /// Loads the vault's model (downloading it if needed), then starts as `with_embedder`.
     pub fn start(vault: Vault, paths: &Paths, on_event: &mut dyn FnMut(Event<'_>)) -> Result<Self> {
         let (embedder, fps) = app::load_model(&vault, paths, on_event)?;
-        Self::with_embedder(vault, Arc::new(embedder), fps)
+        Self::with_embedder(vault, Arc::from(embedder), fps)
     }
 
     /// Starts the background updater and asks for a first run, which rebuilds on a mismatch.
@@ -117,8 +121,17 @@ impl Session {
         if stale_files > 0 {
             self.updater.request();
         }
-        let results = match search::search(&reader, self.embedder.as_ref(), &self.fps.index, query)
-        {
+        let deadline = self
+            .embedder
+            .is_remote()
+            .then(|| Instant::now() + MCP_QUERY_TIMEOUT);
+        let found = match search::search(
+            &reader,
+            self.embedder.as_ref(),
+            &self.fps.index,
+            query,
+            deadline,
+        ) {
             Err(Error::IndexNotReady) => return Err(self.not_ready()?),
             other => other?,
         };
@@ -133,7 +146,9 @@ impl Session {
             });
         }
         Ok(SearchResponse {
-            results,
+            vector_search: found.vector_search(),
+            vector_error: found.vector_error,
+            results: found.hits,
             stale_files,
             index_state,
             indexer_error: seen.status.last_error,

@@ -3,6 +3,7 @@ use std::any::Any;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 
 use crate::cache::{EmbeddingCache, cache_path};
 use crate::config::Vault;
@@ -31,7 +32,32 @@ pub struct UpdaterStatus {
     pub lock_busy: bool,
     /// Files the last completed run could not index (spec §6).
     pub skipped_files: usize,
+    /// A remote API error that needs a settings change (auth, protocol): no further runs until
+    /// the process restarts (remote spec §5.3).
+    pub halted: bool,
+    /// The wait before the next run, after the remote API was unavailable; `None` after a run
+    /// that finished.
+    pub retry_delay: Option<Duration>,
     pub last_error: Option<String>,
+}
+
+/// The waits after runs stopped by an unavailable remote API.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Backoff {
+    pub first: Duration,
+    pub max: Duration,
+}
+
+impl Backoff {
+    /// Remote spec §5.3: 30 s, doubling up to 10 min (guesses, not measured).
+    pub const DEFAULT: Backoff = Backoff {
+        first: Duration::from_secs(30),
+        max: Duration::from_secs(600),
+    };
+
+    fn next(&self, current: Option<Duration>) -> Duration {
+        current.map_or(self.first, |delay| (delay * 2).min(self.max))
+    }
 }
 
 /// The status and whether another process holds the write lock, read together.
@@ -46,6 +72,8 @@ struct State {
     status: UpdaterStatus,
     pending: bool,
     shutdown: bool,
+    /// No run starts before this; requests made meanwhile wait for it.
+    retry_at: Option<Instant>,
 }
 
 struct Shared {
@@ -73,6 +101,17 @@ impl Updater {
         fps: Fingerprints,
         synced: bool,
     ) -> Result<Self> {
+        Self::start_with_backoff(vault, embedder, fps, synced, Backoff::DEFAULT)
+    }
+
+    /// `start` with other waits after an unavailable remote API.
+    pub fn start_with_backoff(
+        vault: Vault,
+        embedder: Arc<dyn Embedder>,
+        fps: Fingerprints,
+        synced: bool,
+        backoff: Backoff,
+    ) -> Result<Self> {
         let mut state = State::default();
         state.status.synced = synced;
         let shared = Arc::new(Shared {
@@ -83,7 +122,7 @@ impl Updater {
         let thread_shared = Arc::clone(&shared);
         std::thread::Builder::new()
             .name("notrieve-indexer".into())
-            .spawn(move || run_loop(&thread_shared, &vault, embedder.as_ref(), &fps))
+            .spawn(move || run_loop(&thread_shared, &vault, embedder.as_ref(), &fps, backoff))
             .map_err(|e| {
                 Error::IndexerFailed(format!("cannot start the background indexer: {e}"))
             })?;
@@ -127,16 +166,39 @@ impl Drop for Updater {
     }
 }
 
-fn run_loop(shared: &Shared, vault: &Vault, embedder: &dyn Embedder, fps: &Fingerprints) {
+fn run_loop(
+    shared: &Shared,
+    vault: &Vault,
+    embedder: &dyn Embedder,
+    fps: &Fingerprints,
+    backoff: Backoff,
+) {
     lower_priority();
     loop {
         let synced = {
             let mut state = shared.lock();
-            while !state.pending && !state.shutdown {
+            loop {
+                if state.shutdown || state.status.stopped || state.status.halted {
+                    return;
+                }
+                // Remote spec §5.3: during the wait, requests only coalesce; one run follows it.
+                if let Some(at) = state.retry_at {
+                    let now = Instant::now();
+                    if now < at {
+                        state = shared
+                            .wake
+                            .wait_timeout(state, at - now)
+                            .unwrap_or_else(|e| e.into_inner())
+                            .0;
+                        continue;
+                    }
+                    state.retry_at = None;
+                    state.pending = true;
+                }
+                if state.pending {
+                    break;
+                }
                 state = shared.wake.wait(state).unwrap_or_else(|e| e.into_inner());
-            }
-            if state.shutdown || state.status.stopped {
-                return;
             }
             state.pending = false;
             state.status.running = true;
@@ -145,8 +207,10 @@ fn run_loop(shared: &Shared, vault: &Vault, embedder: &dyn Embedder, fps: &Finge
         let outcome = catch_unwind(AssertUnwindSafe(|| {
             run_once(shared, vault, embedder, fps, synced)
         }));
-        let mut state = shared.lock();
-        let status = &mut state.status;
+        let mut guard = shared.lock();
+        let State {
+            status, retry_at, ..
+        } = &mut *guard;
         status.running = false;
         status.rebuilding = false;
         status.remaining = None;
@@ -155,7 +219,20 @@ fn run_loop(shared: &Shared, vault: &Vault, embedder: &dyn Embedder, fps: &Finge
             Ok(Ok(Some(report))) => {
                 status.synced = true;
                 status.skipped_files = report.skipped.len();
-                status.last_error = None;
+                match report.interrupted {
+                    Some(reason) => {
+                        let delay = backoff.next(status.retry_delay);
+                        status.retry_delay = Some(delay);
+                        *retry_at = Some(Instant::now() + delay);
+                        status.last_error = Some(format!(
+                            "the background indexer paused for {delay:?}: {reason}"
+                        ));
+                    }
+                    None => {
+                        status.retry_delay = None;
+                        status.last_error = None;
+                    }
+                }
             }
             Ok(Ok(None)) => status.lock_busy = true,
             Ok(Err(Error::FingerprintChanged)) => {
@@ -163,6 +240,13 @@ fn run_loop(shared: &Shared, vault: &Vault, embedder: &dyn Embedder, fps: &Finge
                 status.last_error = Some(format!(
                     "the background indexer stopped: {}",
                     Error::FingerprintChanged
+                ));
+            }
+            // Only auth and protocol errors end a run: transient ones become `interrupted`.
+            Ok(Err(e @ Error::Remote { .. })) => {
+                status.halted = true;
+                status.last_error = Some(format!(
+                    "the background indexer stopped: {e}; fix the [model] settings and restart the MCP server"
                 ));
             }
             Ok(Err(e)) => status.last_error = Some(format!("the background indexer failed: {e}")),
@@ -203,8 +287,9 @@ fn run_once(
     let mut cache = EmbeddingCache::open(&cache_path(&db))?;
     let opts = IndexOptions {
         exclude: &vault.config.exclude,
-        chunk_max_tokens: vault.config.chunk_max_tokens,
+        chunk_max_tokens: vault.config.chunk_max_tokens(),
         budget: None,
+        deadline: None,
         rebuild: false,
     };
     let report = indexer::index_vault(
@@ -222,6 +307,8 @@ fn run_once(
                     state.status.rebuild_generation += 1;
                 }
                 IndexEvent::File(p) => state.status.remaining = Some(p.total - p.done),
+                // The MCP process has no terminal to show it on.
+                IndexEvent::SendingToRemote { .. } => {}
             }
         },
     )?;
@@ -269,5 +356,23 @@ fn lower_priority() {
     // SAFETY: on Linux the nice value is per thread, so this lowers only the calling thread.
     unsafe {
         libc::setpriority(libc::PRIO_PROCESS, libc::gettid() as libc::id_t, 10);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_next_delay_doubles_up_to_the_maximum() {
+        let backoff = Backoff {
+            first: Duration::from_millis(100),
+            max: Duration::from_millis(500),
+        };
+        let ms = Duration::from_millis;
+        assert_eq!(backoff.next(None), ms(100));
+        assert_eq!(backoff.next(Some(ms(100))), ms(200));
+        assert_eq!(backoff.next(Some(ms(200))), ms(400));
+        assert_eq!(backoff.next(Some(ms(400))), ms(500));
     }
 }

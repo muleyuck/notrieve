@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 use crate::cache::{EmbeddingCache, EmbeddingKey, embedding_key};
 use crate::embed::Embedder;
+use crate::error::RemoteErrorKind;
 use crate::fingerprint::Fingerprints;
 use crate::markdown::chunk::{MERGE_BELOW_TOKENS, chunk_note};
 use crate::markdown::{parse_note, title_from_path};
@@ -14,13 +15,20 @@ use crate::store::{ChunkRecord, FileRecord, RebuildReason, Store};
 use crate::{Error, Result};
 use scan::{ScanEntry, plan_changes, scan_vault};
 
+/// Remote spec §6: this many files in a row refused by the API means the settings are wrong.
+pub const INPUT_STREAK_LIMIT: usize = 5;
+
 pub struct IndexOptions<'a> {
     pub exclude: &'a [String],
     pub chunk_max_tokens: usize,
-    /// Start new files only while this much time has not elapsed; a started file always finishes.
+    /// Start new files only while this much time has not elapsed since the run began; a started
+    /// file always finishes. Local models only: a remote run uses `deadline`.
     /// When the budget stops a run, deletions are deferred to a later run.
     /// `IndexReport::remaining` counts unprocessed files plus deferred deletions.
     pub budget: Option<Duration>,
+    /// Replaces `budget` when set, and also cuts off the embedding call of the file in progress
+    /// (remote spec §5.1); that file is left for a later run.
+    pub deadline: Option<Instant>,
     /// Rebuild even when the stored fingerprints match (`index --rebuild`).
     pub rebuild: bool,
 }
@@ -42,6 +50,8 @@ pub struct IndexReport {
     pub scan_complete: bool,
     pub rebuilt: bool,
     pub rebuild_reason: Option<RebuildReason>,
+    /// Why the run stopped with files left: the embedding API was unavailable or out of time.
+    pub interrupted: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,6 +66,39 @@ pub enum IndexEvent<'a> {
     /// Sent before the index is dropped, so the user sees why the run takes long.
     Rebuilding(RebuildReason),
     File(Progress<'a>),
+    /// Sent once per run, right before the first note text goes to an embedding API off this
+    /// machine (remote spec §5.1).
+    SendingToRemote {
+        host: &'a str,
+    },
+}
+
+/// Remote spec §4: every vector in a remote model's index has the dimension of the first one,
+/// read from the index or, without one, taken from the first vector this run sees.
+struct DimCheck {
+    remote: bool,
+    base: Option<usize>,
+}
+
+impl DimCheck {
+    fn check(&mut self, dim: usize) -> Result<()> {
+        if !self.remote {
+            return Ok(());
+        }
+        match self.base {
+            None => {
+                self.base = Some(dim);
+                Ok(())
+            }
+            Some(base) if base == dim => Ok(()),
+            Some(base) => Err(Error::Remote {
+                kind: RemoteErrorKind::Protocol,
+                message: format!(
+                    "the API returned {dim}-dimensional vectors but the index holds {base}-dimensional ones; set a new model.id to rebuild the index with this model"
+                ),
+            }),
+        }
+    }
 }
 
 pub fn index_vault<E: Embedder + ?Sized>(
@@ -68,6 +111,13 @@ pub fn index_vault<E: Embedder + ?Sized>(
     on_event: &mut dyn FnMut(IndexEvent<'_>),
 ) -> Result<IndexReport> {
     let started = Instant::now();
+    // A deadline, when given, decides instead of the budget (remote spec §5.1).
+    let out_of_time = || match opts.deadline {
+        Some(deadline) => Instant::now() >= deadline,
+        None => opts
+            .budget
+            .is_some_and(|budget| started.elapsed() >= budget),
+    };
     let mut report = IndexReport::default();
     // Scan first: invalid exclude or ignore rules must fail before anything is dropped.
     let scan = scan_vault(root, opts.exclude)?;
@@ -86,6 +136,18 @@ pub fn index_vault<E: Embedder + ?Sized>(
         report.rebuilt = true;
         report.rebuild_reason = Some(reason);
     }
+    // Read once after any rebuild, which drops the chunks the dimension was read from.
+    let mut dims = DimCheck {
+        remote: embedder.is_remote(),
+        base: None,
+    };
+    if dims.remote
+        && let Some(key) = store.any_embedding_key()?
+    {
+        dims.base = cache.vector_dim(&key)?;
+    }
+    let mut announced = false;
+    let mut input_streak = 0;
     for err in &scan.errors {
         tracing::warn!("{err}");
     }
@@ -104,10 +166,7 @@ pub fn index_vault<E: Embedder + ?Sized>(
     let mut finished = true;
     for (done, entry) in plan.candidates.iter().enumerate() {
         // The budget decides whether a new file may start; a started file always finishes.
-        if opts
-            .budget
-            .is_some_and(|budget| started.elapsed() >= budget)
-        {
+        if out_of_time() {
             report.remaining = total - done + deleted.len();
             finished = false;
             break;
@@ -153,17 +212,67 @@ pub fn index_vault<E: Embedder + ?Sized>(
                 continue;
             }
         }
-        match index_file(
+        let outcome = index_file(
             store,
             cache,
             embedder,
             fps,
-            opts.chunk_max_tokens,
+            opts,
             entry,
             bytes,
             hash,
-        ) {
-            Ok(()) => report.indexed += 1,
+            &mut dims,
+            &mut || {
+                if !announced {
+                    announced = true;
+                    if let Some(host) = embedder.remote_host() {
+                        on_event(IndexEvent::SendingToRemote { host });
+                    }
+                }
+            },
+        );
+        match outcome {
+            Ok(requested) => {
+                report.indexed += 1;
+                if requested {
+                    input_streak = 0;
+                }
+            }
+            // Like the budget: the rest waits for a later run, and nothing is recorded as skipped.
+            Err(Error::Remote {
+                kind: RemoteErrorKind::Transient,
+                message,
+            }) => {
+                report.remaining = total - done + deleted.len();
+                report.interrupted = Some(message);
+                finished = false;
+                break;
+            }
+            Err(
+                e @ Error::Remote {
+                    kind: RemoteErrorKind::Input,
+                    ..
+                },
+            ) => {
+                tracing::warn!(path = %entry.rel, "skipped: {e}");
+                store.skip_file(
+                    &fps.index,
+                    &entry.rel,
+                    entry.mtime_ns,
+                    entry.size,
+                    &e.to_string(),
+                )?;
+                // Only a request draws an `Input` error, so every one counts.
+                input_streak += 1;
+                if input_streak == INPUT_STREAK_LIMIT {
+                    return Err(Error::Remote {
+                        kind: RemoteErrorKind::Protocol,
+                        message: format!(
+                            "the API refused {INPUT_STREAK_LIMIT} files in a row (last: {e}); check the [model] settings"
+                        ),
+                    });
+                }
+            }
             Err(e @ (Error::NotUtf8(_) | Error::Embedding(_) | Error::ChunkTooLarge { .. })) => {
                 tracing::warn!(path = %entry.rel, "skipped: {e}");
                 store.skip_file(
@@ -180,10 +289,7 @@ pub fn index_vault<E: Embedder + ?Sized>(
     // Deletions wait until every candidate was seen (an unprocessed candidate may be the moved
     // file) and, like files, start only while budget remains.
     if finished {
-        if opts
-            .budget
-            .is_some_and(|budget| started.elapsed() >= budget)
-        {
+        if out_of_time() {
             report.remaining += deleted.len();
         } else {
             for path in &deleted {
@@ -219,17 +325,20 @@ pub fn index_vault<E: Embedder + ?Sized>(
     Ok(report)
 }
 
+/// Returns whether texts were sent to the embedder; files served from the cache were not.
 #[allow(clippy::too_many_arguments)]
 fn index_file<E: Embedder + ?Sized>(
     store: &mut Store,
     cache: &mut EmbeddingCache,
     embedder: &E,
     fps: &Fingerprints,
-    chunk_max_tokens: usize,
+    opts: &IndexOptions<'_>,
     entry: &ScanEntry,
     bytes: Vec<u8>,
     hash: String,
-) -> Result<()> {
+    dims: &mut DimCheck,
+    before_request: &mut dyn FnMut(),
+) -> Result<bool> {
     let text = String::from_utf8(bytes).map_err(|_| Error::NotUtf8(entry.rel.clone()))?;
     let note = parse_note(&entry.rel, &text);
     for warning in &note.meta.warnings {
@@ -239,7 +348,7 @@ fn index_file<E: Embedder + ?Sized>(
         note.body,
         note.body_start_line,
         &note.meta.title,
-        chunk_max_tokens,
+        opts.chunk_max_tokens,
         MERGE_BELOW_TOKENS,
         embedder,
     )?;
@@ -253,13 +362,17 @@ fn index_file<E: Embedder + ?Sized>(
         .collect();
     let mut missing: Vec<usize> = Vec::new();
     for (i, key) in keys.iter().enumerate() {
-        if !cache.contains(key)? && !missing.iter().any(|&j| keys[j] == *key) {
-            missing.push(i);
+        match cache.vector_dim(key)? {
+            Some(dim) => dims.check(dim)?,
+            None if !missing.iter().any(|&j| keys[j] == *key) => missing.push(i),
+            None => {}
         }
     }
-    if !missing.is_empty() {
+    let requested = !missing.is_empty();
+    if requested {
         let texts: Vec<String> = missing.iter().map(|&i| inputs[i].clone()).collect();
-        let vectors = embedder.embed_documents(&texts)?;
+        before_request();
+        let vectors = embedder.embed_documents_within(&texts, opts.deadline)?;
         // A short answer would leave chunks pointing to keys that were never stored (spec §4.1).
         if vectors.len() != texts.len() {
             return Err(Error::Embedding(format!(
@@ -267,6 +380,10 @@ fn index_file<E: Embedder + ?Sized>(
                 vectors.len(),
                 texts.len()
             )));
+        }
+        // Checked before `put`, so the cache never holds a vector of another dimension.
+        for vector in &vectors {
+            dims.check(vector.len())?;
         }
         let entries: Vec<(EmbeddingKey, Vec<f32>)> =
             missing.iter().map(|&i| keys[i]).zip(vectors).collect();
@@ -297,5 +414,6 @@ fn index_file<E: Embedder + ?Sized>(
         tags: meta.tags,
         frontmatter: meta.frontmatter,
     };
-    store.write_file(&fps.index, &file, &records)
+    store.write_file(&fps.index, &file, &records)?;
+    Ok(requested)
 }

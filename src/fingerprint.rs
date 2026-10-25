@@ -2,7 +2,7 @@ use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
-use crate::config::ModelContract;
+use crate::config::{OnnxContract, RemoteContract};
 use crate::embed::onnx::required_files;
 use crate::markdown::chunk::{CHUNKER_VERSION, MERGE_BELOW_TOKENS};
 use crate::{Error, Result};
@@ -16,7 +16,7 @@ pub struct Fingerprints {
 }
 
 pub fn fingerprints(
-    contract: &ModelContract,
+    contract: &OnnxContract,
     model_dir: &Path,
     chunk_max_tokens: usize,
 ) -> Result<Fingerprints> {
@@ -26,7 +26,7 @@ pub fn fingerprints(
 }
 
 /// Hash of the model contract and every model file.
-pub fn model_fingerprint(contract: &ModelContract, model_dir: &Path) -> Result<String> {
+pub fn model_fingerprint(contract: &OnnxContract, model_dir: &Path) -> Result<String> {
     let mut hasher = blake3::Hasher::new();
     let contract_json = serde_json::to_string(contract).map_err(|e| Error::Model(e.to_string()))?;
     hasher.update(contract_json.as_bytes());
@@ -35,6 +35,30 @@ pub fn model_fingerprint(contract: &ModelContract, model_dir: &Path) -> Result<S
         hasher.update(file_hash(&model_dir.join(file))?.as_bytes());
     }
     Ok(hasher.finalize().to_hex().to_string())
+}
+
+/// Remote spec §4. No model files: the fingerprint covers what decides the document vectors.
+pub fn remote_fingerprints(contract: &RemoteContract, chunk_max_tokens: usize) -> Fingerprints {
+    let model = remote_model_fingerprint(contract);
+    let index = index_fingerprint(&model, chunk_max_tokens);
+    Fingerprints { model, index }
+}
+
+/// The base URL, authentication, `batch_size` and the query settings are left out: they do not
+/// change stored document vectors, so moving to another host does not re-embed every chunk.
+pub fn remote_model_fingerprint(contract: &RemoteContract) -> String {
+    // serde_json's map is ordered by key (its `preserve_order` feature is off), so the JSON does
+    // not depend on the order the TOML lists the params in.
+    let json = serde_json::json!({
+        "kind": "remote",
+        "id": contract.id,
+        "remote_model": contract.remote_model,
+        "document_prefix": contract.document_prefix,
+        "document_params": contract.document_params,
+    });
+    blake3::hash(json.to_string().as_bytes())
+        .to_hex()
+        .to_string()
 }
 
 /// Hash of every input that changes index contents (spec §4.1).
@@ -86,11 +110,13 @@ fn sidecar(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{ModelContract, OnnxContract, RemoteContract, VaultConfig};
     use crate::config::{ModelSource, Pooling};
+    use serde_json::{Map, json};
     use std::fs;
     use tempfile::TempDir;
 
-    fn model(dir: &Path) -> ModelContract {
+    fn model(dir: &Path) -> OnnxContract {
         fs::create_dir_all(dir.join("onnx")).unwrap();
         for (f, body) in [
             ("tokenizer.json", "tok"),
@@ -101,7 +127,7 @@ mod tests {
         ] {
             fs::write(dir.join(f), body).unwrap();
         }
-        ModelContract {
+        OnnxContract {
             id: "m".into(),
             source: ModelSource::Path {
                 dir: dir.to_path_buf(),
@@ -155,12 +181,138 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let c = model(dir.path());
         let base = fingerprints(&c, dir.path(), 450).unwrap();
-        let other = ModelContract {
+        let other = OnnxContract {
             document_prefix: "passage: ".into(),
             ..c
         };
         let changed = fingerprints(&other, dir.path(), 450).unwrap();
         assert_ne!(changed.model, base.model);
         assert_ne!(changed.index, base.index);
+    }
+
+    #[test]
+    fn a_local_contract_keeps_the_fingerprint_it_had_before_remote_models() {
+        let dir = TempDir::new().unwrap();
+        let c = OnnxContract {
+            source: ModelSource::Hf {
+                repo: "owner/repo".into(),
+            },
+            ..model(dir.path())
+        };
+        let fps = fingerprints(&c, dir.path(), 450).unwrap();
+        assert_eq!(
+            fps.model,
+            "b0cac400047857c55d67422605ceca07d6be9ea81526222616989eca6837c1f7"
+        );
+        assert_eq!(
+            fps.index,
+            "e8dc47a17a5c2fababae02047e9770d91aa96d2bf11e22f8eea9b6ae5abe4aa0"
+        );
+    }
+
+    fn remote() -> RemoteContract {
+        RemoteContract {
+            id: "embed-small".into(),
+            base_url: "https://api.example.com/v1".into(),
+            host: "api.example.com".into(),
+            loopback: false,
+            remote_model: "text-embedding-3-small".into(),
+            api_key_env: Some("OPENAI_API_KEY".into()),
+            auth_header: "Authorization".into(),
+            query_prefix: String::new(),
+            document_prefix: String::new(),
+            query_params: Map::new(),
+            document_params: Map::new(),
+            batch_size: 32,
+        }
+    }
+
+    fn params(key: &str, value: serde_json::Value) -> Map<String, serde_json::Value> {
+        let mut map = Map::new();
+        map.insert(key.into(), value);
+        map
+    }
+
+    #[test]
+    fn settings_that_decide_document_vectors_change_the_remote_fingerprint() {
+        let base = remote_model_fingerprint(&remote());
+        for changed in [
+            RemoteContract {
+                id: "embed-small-2".into(),
+                ..remote()
+            },
+            RemoteContract {
+                remote_model: "text-embedding-3-large".into(),
+                ..remote()
+            },
+            RemoteContract {
+                document_prefix: "passage: ".into(),
+                ..remote()
+            },
+            RemoteContract {
+                document_params: params("dimensions", json!(256)),
+                ..remote()
+            },
+        ] {
+            assert_ne!(remote_model_fingerprint(&changed), base, "{changed:?}");
+        }
+    }
+
+    #[test]
+    fn settings_that_leave_document_vectors_alone_keep_the_remote_fingerprint() {
+        let base = remote_model_fingerprint(&remote());
+        for same in [
+            RemoteContract {
+                base_url: "http://localhost:8080/v1".into(),
+                host: "localhost".into(),
+                loopback: true,
+                ..remote()
+            },
+            RemoteContract {
+                api_key_env: None,
+                ..remote()
+            },
+            RemoteContract {
+                auth_header: "api-key".into(),
+                ..remote()
+            },
+            RemoteContract {
+                query_prefix: "query: ".into(),
+                ..remote()
+            },
+            RemoteContract {
+                query_params: params("input_type", json!("query")),
+                ..remote()
+            },
+            RemoteContract {
+                batch_size: 8,
+                ..remote()
+            },
+        ] {
+            assert_eq!(remote_model_fingerprint(&same), base, "{same:?}");
+        }
+    }
+
+    #[test]
+    fn the_remote_fingerprint_ignores_the_order_of_document_params() {
+        let contract = |params: &str| {
+            let toml = format!(
+                "chunk_max_tokens = 1500\n[model]\nsource = \"openai-compat:https://api.example.com/v1\"\n\
+                 remote_model = \"m\"\ndocument_params = {params}\n"
+            );
+            match VaultConfig::parse(&toml)
+                .unwrap()
+                .model
+                .resolve(Path::new("/"))
+                .unwrap()
+            {
+                ModelContract::Remote(c) => c,
+                other => panic!("{other:?}"),
+            }
+        };
+        assert_eq!(
+            remote_model_fingerprint(&contract("{ a = 1, b = { y = 2, x = 3 } }")),
+            remote_model_fingerprint(&contract("{ b = { x = 3, y = 2 }, a = 1 }"))
+        );
     }
 }

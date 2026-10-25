@@ -13,4 +13,4 @@ pub mod search;
 pub mod session;
 pub mod store;
 
-pub use error::{Error, Result};
+pub use error::{Error, RemoteErrorKind, Result};

@@ -2,17 +2,21 @@ mod model;
 mod registry;
 mod vault;
 
-pub use model::{ModelContract, ModelSource, ModelSpec, ModelTable, PRESET_RURI_V3_30M, Pooling};
+pub use model::{
+    ModelContract, ModelSource, ModelSpec, ModelTable, OnnxContract, PRESET_RURI_V3_30M, Pooling,
+    RemoteContract,
+};
 pub use registry::Registry;
 pub use vault::{Vault, find_vault_root, init_vault, resolve_vault};
 
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
 use crate::{Error, Result};
 
+pub const DEFAULT_CHUNK_MAX_TOKENS: usize = 450;
 pub const CONFIG_DIR: &str = ".notrieve";
 pub const CONFIG_FILE: &str = "config.toml";
 pub const DEFAULT_CONFIG_TOML: &str = "\
@@ -33,8 +37,9 @@ pub struct VaultConfig {
     pub db_path: PathBuf,
     #[serde(default = "default_search_budget_ms")]
     pub search_budget_ms: u64,
-    #[serde(default = "default_chunk_max_tokens")]
-    pub chunk_max_tokens: usize,
+    /// `None` when omitted. Required for a remote model, where it counts characters.
+    #[serde(default)]
+    pub chunk_max_tokens: Option<usize>,
     #[serde(default)]
     pub index_threads: usize,
 }
@@ -49,10 +54,6 @@ fn default_db_path() -> PathBuf {
 
 fn default_search_budget_ms() -> u64 {
     2000
-}
-
-fn default_chunk_max_tokens() -> usize {
-    450
 }
 
 impl VaultConfig {
@@ -71,7 +72,20 @@ impl VaultConfig {
                 config.db_path.display()
             )));
         }
+        // The model settings are checked when the vault loads, before anything uses them. A
+        // `path:` source is only joined to the root here, never read, so any root does.
+        let contract = config.model.resolve(Path::new("/"))?;
+        if matches!(contract, ModelContract::Remote(_)) && config.chunk_max_tokens.is_none() {
+            return Err(Error::Config(
+                "chunk_max_tokens is required for a remote model; it counts characters (for example 1500)".into(),
+            ));
+        }
         Ok(config)
+    }
+
+    /// `chunk_max_tokens`, or 450 when a local model's config omits it.
+    pub fn chunk_max_tokens(&self) -> usize {
+        self.chunk_max_tokens.unwrap_or(DEFAULT_CHUNK_MAX_TOKENS)
     }
 }
 
@@ -118,9 +132,31 @@ mod tests {
         assert!(c.exclude.is_empty());
         assert_eq!(c.db_path, PathBuf::from(".notrieve/index.db"));
         assert_eq!(
-            (c.search_budget_ms, c.chunk_max_tokens, c.index_threads),
+            (c.search_budget_ms, c.chunk_max_tokens(), c.index_threads),
             (2000, 450, 0)
         );
+    }
+
+    #[test]
+    fn an_invalid_model_is_rejected_when_the_config_is_parsed() {
+        let err = VaultConfig::parse("model = \"no-such-preset\"\n").unwrap_err();
+        assert!(
+            matches!(&err, Error::Config(m) if m.contains("no-such-preset")),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_remote_model_requires_chunk_max_tokens() {
+        let model =
+            "[model]\nsource = \"openai-compat:https://api.openai.com/v1\"\nremote_model = \"m\"\n";
+        let err = VaultConfig::parse(model).unwrap_err();
+        assert!(
+            matches!(&err, Error::Config(m) if m.contains("chunk_max_tokens")),
+            "{err}"
+        );
+        let c = VaultConfig::parse(&format!("chunk_max_tokens = 1200\n{model}")).unwrap();
+        assert_eq!(c.chunk_max_tokens(), 1200);
     }
 
     #[test]

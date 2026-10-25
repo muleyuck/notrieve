@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::store::{classify, with_suffix};
 use crate::{Error, Result};
@@ -131,11 +131,13 @@ impl EmbeddingCache {
         self.created
     }
 
-    pub fn contains(&self, key: &EmbeddingKey) -> Result<bool> {
+    /// The dimension of the vector stored under `key`, or `None` when it is not cached.
+    pub fn vector_dim(&self, key: &EmbeddingKey) -> Result<Option<usize>> {
         let mut stmt = self
             .conn
-            .prepare_cached("SELECT 1 FROM embeddings WHERE key = ?1")?;
-        Ok(stmt.exists([key])?)
+            .prepare_cached("SELECT length(vector) FROM embeddings WHERE key = ?1")?;
+        let bytes: Option<i64> = stmt.query_row([key], |r| r.get(0)).optional()?;
+        Ok(bytes.map(|b| b as usize / 4))
     }
 
     /// One transaction; it commits before the index rows that reference these keys (spec §4.1).
@@ -270,8 +272,8 @@ mod tests {
         cache.put(&[(key(7), vec![1.5, -2.0])]).unwrap();
         drop(cache);
         let cache = EmbeddingCache::open(&path).unwrap();
-        assert!(cache.contains(&key(7)).unwrap());
-        assert!(!cache.contains(&key(8)).unwrap());
+        assert_eq!(cache.vector_dim(&key(7)).unwrap(), Some(2));
+        assert_eq!(cache.vector_dim(&key(8)).unwrap(), None);
         let blob: Vec<u8> = cache
             .conn()
             .query_row("SELECT vector FROM embeddings", [], |r| r.get(0))
@@ -293,8 +295,8 @@ mod tests {
         let keep: HashSet<EmbeddingKey> = [key(2)].into_iter().collect();
         assert_eq!(cache.retain(&keep).unwrap(), 2);
         assert_eq!(cache.entry_count().unwrap(), 1);
-        assert!(cache.contains(&key(2)).unwrap());
-        assert!(!cache.contains(&key(1)).unwrap());
+        assert_eq!(cache.vector_dim(&key(2)).unwrap(), Some(1));
+        assert_eq!(cache.vector_dim(&key(1)).unwrap(), None);
     }
 
     #[test]

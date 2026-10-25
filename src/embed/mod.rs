@@ -1,10 +1,13 @@
 pub mod download;
 pub mod fake;
 pub mod onnx;
+pub mod remote;
 
 pub use onnx::OnnxEmbedder;
+pub use remote::RemoteEmbedder;
 
 use std::sync::{Mutex, MutexGuard};
+use std::time::Instant;
 
 use crate::Result;
 use crate::markdown::chunk::TokenCount;
@@ -27,6 +30,31 @@ pub trait Embedder: Send + Sync {
             .map(|(o, _)| o)
             .chain(std::iter::once(text.len()))
             .collect())
+    }
+
+    /// `embed_documents` that gives up at `deadline`. Local models ignore it.
+    fn embed_documents_within(
+        &self,
+        texts: &[String],
+        _deadline: Option<Instant>,
+    ) -> Result<Vec<Vec<f32>>> {
+        self.embed_documents(texts)
+    }
+
+    /// `embed_query` that gives up at `deadline`. Local models ignore it.
+    fn embed_query_within(&self, text: &str, _deadline: Option<Instant>) -> Result<Vec<f32>> {
+        self.embed_query(text)
+    }
+
+    /// The host note text is sent to, when it leaves this machine.
+    fn remote_host(&self) -> Option<&str> {
+        None
+    }
+
+    /// The model runs behind an embedding API (even one on this machine): `dim()` is 0 and the
+    /// dimension comes from the stored vectors, and time limits are deadlines (remote spec §4, §5).
+    fn is_remote(&self) -> bool {
+        false
     }
 }
 

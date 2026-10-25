@@ -1,12 +1,12 @@
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::cache::{EmbeddingCache, cache_path};
-use crate::config::{self, Registry, Vault};
+use crate::config::{self, ModelContract, Registry, Vault};
 use crate::embed::download::{DownloadEvent, ensure_model, with_model};
 use crate::embed::onnx::resolve_threads;
-use crate::embed::{Embedder, OnnxEmbedder};
-use crate::fingerprint::{Fingerprints, fingerprints};
+use crate::embed::{Embedder, OnnxEmbedder, RemoteEmbedder};
+use crate::fingerprint::{Fingerprints, fingerprints, remote_fingerprints};
 use crate::indexer::scan::{plan_changes, scan_vault};
 use crate::indexer::{self, IndexEvent, IndexOptions, IndexReport, Progress};
 use crate::lock;
@@ -36,6 +36,8 @@ pub enum Event<'a> {
     Rebuilding(RebuildReason),
     Indexing(Progress<'a>),
     CorruptDbMoved(&'a Path),
+    /// Note text is about to go to an embedding API on this host (remote spec §5.1).
+    SendingToRemote(&'a str),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,16 +94,33 @@ pub fn list_vaults(paths: &Paths) -> Result<Registry> {
     Registry::load(&paths.registry)
 }
 
+/// What `notrieve model pull` did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PullOutcome {
+    Downloaded(PathBuf),
+    /// A remote model has nothing to download.
+    Remote {
+        host: String,
+    },
+}
+
 pub fn pull_model(
     vault: &Vault,
     paths: &Paths,
     force: bool,
     on_event: &mut dyn FnMut(Event<'_>),
-) -> Result<PathBuf> {
-    let contract = vault.config.model.resolve(&vault.root)?;
-    ensure_model(&contract, &paths.model_cache, force, &mut |e| {
-        on_event(Event::Download(e))
-    })
+) -> Result<PullOutcome> {
+    match vault.config.model.resolve(&vault.root)? {
+        ModelContract::Local(contract) => {
+            ensure_model(&contract, &paths.model_cache, force, &mut |e| {
+                on_event(Event::Download(e))
+            })
+            .map(PullOutcome::Downloaded)
+        }
+        ModelContract::Remote(contract) => Ok(PullOutcome::Remote {
+            host: contract.host,
+        }),
+    }
 }
 
 pub fn index(
@@ -125,15 +144,16 @@ pub fn index(
     };
     let opts = IndexOptions {
         exclude: &vault.config.exclude,
-        chunk_max_tokens: vault.config.chunk_max_tokens,
+        chunk_max_tokens: vault.config.chunk_max_tokens(),
         budget: request.budget,
+        deadline: None,
         rebuild: request.rebuild,
     };
     indexer::index_vault(
         &vault.root,
         &mut store,
         &mut cache,
-        &embedder,
+        embedder.as_ref(),
         &fps,
         &opts,
         &mut |e| forward(e, on_event),
@@ -149,11 +169,15 @@ pub fn search(
 ) -> Result<SearchResponse> {
     query.validate()?;
     let (embedder, fps) = load_model(vault, paths, on_event)?;
-    search_vault(vault, &embedder, &fps, query, on_event)
+    search_vault(vault, embedder.as_ref(), &fps, query, on_event)
 }
 
+/// Remote spec §5.2: the end of `search_budget_ms` is kept for embedding the query (a guess at
+/// one round trip with a TLS handshake; not measured).
+pub const QUERY_RESERVE: Duration = Duration::from_millis(1000);
+
 /// Updates within `search_budget_ms` when no other process holds the lock, then light-scans and
-/// searches (spec §5.3).
+/// searches (spec §5.3). A remote model gets deadlines instead (remote spec §5.2).
 pub fn search_vault<E: Embedder + ?Sized>(
     vault: &Vault,
     embedder: &E,
@@ -162,17 +186,29 @@ pub fn search_vault<E: Embedder + ?Sized>(
     on_event: &mut dyn FnMut(Event<'_>),
 ) -> Result<SearchResponse> {
     query.validate()?;
+    let started = Instant::now();
+    let budget = Duration::from_millis(vault.config.search_budget_ms);
+    let remote = embedder.is_remote();
+    // A remote update ends `QUERY_RESERVE` early; with no more budget than that, it is skipped.
+    let update_deadline = budget
+        .checked_sub(QUERY_RESERVE)
+        .filter(|left| !left.is_zero())
+        .map(|left| started + left);
+    let mut indexer_error = None;
     let db = vault.db_path();
-    if let Some(_lock) = lock::try_lock(&vault.lock_path())? {
+    if (!remote || update_deadline.is_some())
+        && let Some(_lock) = lock::try_lock(&vault.lock_path())?
+    {
         let mut store = Store::open(&db)?;
         let mut cache = EmbeddingCache::open(&cache_path(&db))?;
         let opts = IndexOptions {
             exclude: &vault.config.exclude,
-            chunk_max_tokens: vault.config.chunk_max_tokens,
-            budget: Some(Duration::from_millis(vault.config.search_budget_ms)),
+            chunk_max_tokens: vault.config.chunk_max_tokens(),
+            budget: (!remote).then_some(budget),
+            deadline: if remote { update_deadline } else { None },
             rebuild: false,
         };
-        indexer::index_vault(
+        match indexer::index_vault(
             &vault.root,
             &mut store,
             &mut cache,
@@ -180,7 +216,12 @@ pub fn search_vault<E: Embedder + ?Sized>(
             fps,
             &opts,
             &mut |e| forward(e, on_event),
-        )?;
+        ) {
+            Ok(_) => {}
+            // An API setting that is wrong (auth, protocol) still leaves the index searchable.
+            Err(e @ Error::Remote { .. }) => indexer_error = Some(e.to_string()),
+            Err(e) => return Err(e),
+        }
     }
     let reader = search::open_reader(&db)?;
     let scan = scan_vault(&vault.root, &vault.config.exclude)?;
@@ -196,23 +237,33 @@ pub fn search_vault<E: Embedder + ?Sized>(
     } else {
         IndexState::IdleStale
     };
-    let results = search::search(&reader, embedder, &fps.index, query)?;
+    let query_deadline = remote.then(|| (started + budget).max(Instant::now() + QUERY_RESERVE));
+    let found = search::search(&reader, embedder, &fps.index, query, query_deadline)?;
     Ok(SearchResponse {
-        results,
+        vector_search: found.vector_search(),
+        vector_error: found.vector_error,
+        results: found.hits,
         stale_files,
         index_state,
-        indexer_error: None,
+        indexer_error,
     })
 }
 
-/// Loads the vault's model and computes its fingerprints while the model cache lock is held.
+/// Loads the vault's model and computes its fingerprints. A local model is read while the model
+/// cache lock is held; a remote one downloads nothing (its API key is read per request).
 pub fn load_model(
     vault: &Vault,
     paths: &Paths,
     on_event: &mut dyn FnMut(Event<'_>),
-) -> Result<(OnnxEmbedder, Fingerprints)> {
-    let contract = vault.config.model.resolve(&vault.root)?;
-    let max = vault.config.chunk_max_tokens;
+) -> Result<(Box<dyn Embedder>, Fingerprints)> {
+    let max = vault.config.chunk_max_tokens();
+    let contract = match vault.config.model.resolve(&vault.root)? {
+        ModelContract::Remote(contract) => {
+            let fps = remote_fingerprints(&contract, max);
+            return Ok((Box::new(RemoteEmbedder::new(contract)), fps));
+        }
+        ModelContract::Local(contract) => contract,
+    };
     with_model(
         &contract,
         &paths.model_cache,
@@ -221,9 +272,10 @@ pub fn load_model(
         |dir| {
             let embedder =
                 OnnxEmbedder::load(&contract, dir, resolve_threads(vault.config.index_threads))?;
+            // Spec §4.3; a remote model has no token limit to check against (remote spec §2).
             check_chunk_limit(max, embedder.effective_max_tokens())?;
             let fps = fingerprints(&contract, dir, max)?;
-            Ok((embedder, fps))
+            Ok((Box::new(embedder) as Box<dyn Embedder>, fps))
         },
     )
 }
@@ -232,6 +284,7 @@ fn forward(event: IndexEvent<'_>, on_event: &mut dyn FnMut(Event<'_>)) {
     on_event(match event {
         IndexEvent::Rebuilding(reason) => Event::Rebuilding(reason),
         IndexEvent::File(progress) => Event::Indexing(progress),
+        IndexEvent::SendingToRemote { host } => Event::SendingToRemote(host),
     });
 }
 

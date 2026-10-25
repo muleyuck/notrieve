@@ -123,6 +123,7 @@ fn index(
         exclude: &[],
         chunk_max_tokens: 450,
         budget: None,
+        deadline: None,
         rebuild: false,
     };
     index_vault(root, store, &mut cache, embedder, fps, &opts, &mut |_| {}).unwrap()
@@ -152,6 +153,8 @@ fn ten_thousand_files_rebuild_from_the_cache_in_30_seconds_and_search_within_the
 
     let contract = ModelSpec::Preset(PRESET_RURI_V3_30M.into())
         .resolve(&root)
+        .unwrap()
+        .into_local()
         .unwrap();
     let dir = ensure_model(&contract, &model_cache_dir().unwrap(), false, &mut |_| {}).unwrap();
     let real = OnnxEmbedder::load(&contract, &dir, resolve_threads(0)).unwrap();
@@ -197,7 +200,15 @@ fn ten_thousand_files_rebuild_from_the_cache_in_30_seconds_and_search_within_the
         "睡眠",
     ] {
         let started = Instant::now();
-        let hits = search(&reader, &embedder, &updated.index, &SearchQuery::new(text)).unwrap();
+        let hits = search(
+            &reader,
+            &embedder,
+            &updated.index,
+            &SearchQuery::new(text),
+            None,
+        )
+        .unwrap()
+        .hits;
         let took = started.elapsed();
         eprintln!("search {text:?}: {took:?}");
         assert_eq!(hits.len(), DEFAULT_K);

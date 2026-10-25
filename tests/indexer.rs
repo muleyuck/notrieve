@@ -87,6 +87,7 @@ impl Fixture {
             exclude: &exclude,
             chunk_max_tokens: 450,
             budget,
+            deadline: None,
             rebuild,
         };
         let mut cache = self.cache();
@@ -429,6 +430,7 @@ fn invalid_exclude_fails_before_a_fingerprint_rebuild_wipes_the_index() {
         exclude: &bad,
         chunk_max_tokens: 450,
         budget: None,
+        deadline: None,
         rebuild: false,
     };
     let result = index_vault(
@@ -457,6 +459,7 @@ fn malformed_gitignore_line_is_an_error_and_well_formed_one_is_complete() {
         exclude: &[],
         chunk_max_tokens: 450,
         budget: None,
+        deadline: None,
         rebuild: false,
     };
     let result = index_vault(
@@ -508,6 +511,7 @@ fn malformed_parent_gitignore_is_an_error() {
         exclude: &[],
         chunk_max_tokens: 450,
         budget: None,
+        deadline: None,
         rebuild: false,
     };
     let result = index_vault(
@@ -565,6 +569,7 @@ fn rebuilding_is_announced_before_any_file_starts() {
         exclude: &[],
         chunk_max_tokens: 450,
         budget: None,
+        deadline: None,
         rebuild: false,
     };
     let mut events: Vec<String> = Vec::new();
@@ -579,6 +584,7 @@ fn rebuilding_is_announced_before_any_file_starts() {
             events.push(match event {
                 IndexEvent::Rebuilding(reason) => format!("rebuild:{reason:?}"),
                 IndexEvent::File(p) => format!("file:{}", p.path),
+                IndexEvent::SendingToRemote { host } => format!("send:{host}"),
             })
         },
     )
@@ -597,6 +603,7 @@ fn invalid_exclude_with_an_explicit_rebuild_keeps_the_index() {
         exclude: &bad,
         chunk_max_tokens: 450,
         budget: None,
+        deadline: None,
         rebuild: true,
     };
     let result = index_vault(
@@ -703,7 +710,7 @@ fn unreferenced_vectors_are_removed_after_a_complete_run() {
         s.embedding_keys().unwrap().len()
     );
     for key in &old_keys {
-        assert!(!cache.contains(key).unwrap());
+        assert_eq!(cache.vector_dim(key).unwrap(), None);
     }
 }
 
@@ -767,6 +774,7 @@ fn embedder_returning_too_few_vectors_skips_the_file_and_writes_no_index_rows() 
         exclude: &[],
         chunk_max_tokens: 450,
         budget: None,
+        deadline: None,
         rebuild: false,
     };
     let r = index_vault(
@@ -844,6 +852,7 @@ fn failure_after_the_cache_write_leaves_no_dangling_key() {
         exclude: &[],
         chunk_max_tokens: 450,
         budget: None,
+        deadline: None,
         rebuild: false,
     };
     let err = index_vault(
@@ -883,6 +892,7 @@ fn vectors_orphaned_by_a_failed_run_are_removed_even_when_nothing_is_reindexed()
         exclude: &[],
         chunk_max_tokens: 450,
         budget: None,
+        deadline: None,
         rebuild: false,
     };
     let failed = index_vault(
@@ -917,6 +927,7 @@ fn cache_recreated_before_a_failed_run_is_still_rebuilt_by_the_next_run() {
         exclude: &bad,
         chunk_max_tokens: 450,
         budget: None,
+        deadline: None,
         rebuild: false,
     };
     let failed = index_vault(
@@ -990,6 +1001,7 @@ fn unchanged_skipped_file_is_not_retried_but_stays_in_the_report() {
         exclude: &[],
         chunk_max_tokens: 450,
         budget: None,
+        deadline: None,
         rebuild: false,
     };
     let mut attempted: Vec<String> = Vec::new();

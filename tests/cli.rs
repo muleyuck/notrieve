@@ -6,6 +6,9 @@ use tempfile::TempDir;
 
 mod support;
 
+use support::fake_api::{FakeApi, Reply};
+use support::remote_config;
+
 struct Env {
     home: TempDir,
 }
@@ -261,5 +264,140 @@ fn mcp_outside_any_vault_answers_tools_with_the_vault_error_and_keeps_stdout_to_
     assert!(
         !env.home.path().join("cache/notrieve/models").exists(),
         "no model was fetched"
+    );
+}
+
+fn remote_vault(env: &Env, name: &str, base: &str) -> PathBuf {
+    let root = env.dir(name);
+    fs::create_dir_all(root.join(".notrieve")).unwrap();
+    fs::write(
+        root.join(".notrieve/config.toml"),
+        remote_config(base, "", ""),
+    )
+    .unwrap();
+    root
+}
+
+#[test]
+fn model_pull_for_a_remote_model_downloads_nothing() {
+    let env = Env::new();
+    let root = remote_vault(&env, "notes", "http://127.0.0.1:9/v1");
+    let o = env.run(&root, &["model", "pull"]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    assert!(
+        stdout(&o).contains("model is remote (127.0.0.1); nothing to download"),
+        "{}",
+        stdout(&o)
+    );
+    assert!(!env.home.path().join("cache/notrieve").exists());
+}
+
+#[test]
+fn index_with_a_remote_model_goes_through_the_api() {
+    let api = FakeApi::start(Reply::Embed { dim: 8 });
+    let env = Env::new();
+    let root = remote_vault(&env, "notes", &api.base);
+    fs::write(root.join("a.md"), "# A\nalpha\n").unwrap();
+    let o = env.run(&root, &["index"]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    assert!(stdout(&o).starts_with("indexed 1,"), "{}", stdout(&o));
+    assert_eq!(api.requests().len(), 1);
+}
+
+#[test]
+fn index_reports_a_stop_on_stderr_and_exits_0() {
+    let api = FakeApi::start(Reply::status(503));
+    let env = Env::new();
+    let root = remote_vault(&env, "notes", &api.base);
+    fs::write(root.join("a.md"), "# A\nalpha\n").unwrap();
+    let o = env.run(&root, &["index"]);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    let err = stderr(&o);
+    assert!(err.contains("stopped:"), "{err}");
+    assert!(err.contains("1 file(s) left for the next run"), "{err}");
+    assert!(stdout(&o).starts_with("indexed 0,"), "{}", stdout(&o));
+}
+
+#[test]
+fn init_without_index_writes_the_settings_and_registers_only() {
+    let env = Env::new();
+    let root = env.dir("notes");
+    let o = env.run(&root, &["init", "--no-index"]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    assert!(root.join(".notrieve/config.toml").is_file());
+    assert!(root.join(".notrieve/.gitignore").is_file());
+    assert!(!root.join(".notrieve/index.db").exists());
+    assert!(!env.home.path().join("cache/notrieve").exists());
+    assert!(stdout(&o).contains("notrieve index"), "{}", stdout(&o));
+    let list = env.run(&root, &["vault", "list"]);
+    assert!(stdout(&list).starts_with("notes\t"), "{}", stdout(&list));
+}
+
+#[test]
+fn verbose_logging_does_not_print_the_api_key() {
+    const KEY: &str = "sk-trace-SECRET-9f3a";
+    // The key goes in User-Agent, a header whose value ureq prints at debug level. The last filter
+    // names a longer target than any cap on `ureq_proto` could.
+    for filter in ["debug", "trace", "ureq_proto::util=trace"] {
+        let api = FakeApi::start(Reply::Embed { dim: 8 });
+        let env = Env::new();
+        let root = env.dir("notes");
+        fs::create_dir_all(root.join(".notrieve")).unwrap();
+        fs::write(
+            root.join(".notrieve/config.toml"),
+            remote_config(
+                &api.base,
+                "",
+                "api_key_env = \"NOTRIEVE_TEST_TRACE_KEY\"\nauth_header = \"User-Agent\"",
+            ),
+        )
+        .unwrap();
+        fs::write(root.join("a.md"), "# A\nalpha\n").unwrap();
+        let o = env
+            .command(&root, &["index"])
+            .env("NOTRIEVE_TEST_TRACE_KEY", KEY)
+            .env("NOTRIEVE_LOG", filter)
+            .output()
+            .unwrap();
+        assert!(o.status.success(), "{filter}: {}", stderr(&o));
+        assert_eq!(api.requests().len(), 1, "{filter}");
+        let log = stderr(&o);
+        // ureq-proto logs the request buffer in rows of 16 bytes (hex, then the same bytes as
+        // characters), so the key is split across rows: join the character columns.
+        let characters: String = log
+            .lines()
+            .filter(|line| line.contains("ureq_proto"))
+            .filter_map(|line| line.char_indices().rev().nth(15).map(|(i, _)| &line[i..]))
+            .collect();
+        assert!(!log.contains(KEY), "{filter}: the key reached the log");
+        assert!(
+            !characters.contains(KEY),
+            "{filter}: the key reached the trace dump"
+        );
+    }
+}
+
+#[test]
+fn search_prints_the_update_failure_and_the_missing_vector_side_on_stderr() {
+    let api = FakeApi::start(Reply::Embed { dim: 8 });
+    let env = Env::new();
+    let root = remote_vault(&env, "notes", &api.base);
+    fs::write(root.join("a.md"), "# A\nalphabet soup\n").unwrap();
+    let o = env.run(&root, &["index"]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    fs::write(root.join("b.md"), "# B\nanother note\n").unwrap();
+    api.set_default(Reply::status(401));
+    let o = env.run(&root, &["search", "alphabet"]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    assert!(stdout(&o).contains("a.md"), "{}", stdout(&o));
+    assert!(
+        stderr(&o).contains("the index was not updated:"),
+        "{}",
+        stderr(&o)
+    );
+    assert!(
+        stderr(&o).contains("semantic search is unavailable"),
+        "{}",
+        stderr(&o)
     );
 }
