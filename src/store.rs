@@ -804,6 +804,16 @@ mod tests {
     }
 
     #[test]
+    fn rebuild_clears_skipped_rows() {
+        let dir = TempDir::new().unwrap();
+        let mut s = rebuilt(&dir, "fp-a", 4);
+        s.skip_file("fp-a", "bad.md", 1, 3, "not UTF-8").unwrap();
+        assert_eq!(s.skipped_states().unwrap().len(), 1);
+        s.rebuild(&fps("fp-a"), "fake", 4).unwrap();
+        assert!(s.skipped_states().unwrap().is_empty());
+    }
+
+    #[test]
     fn damaged_pages_are_detected_and_moved_aside_on_rebuild() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("index.db");

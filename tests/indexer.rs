@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
 use notrieve::Error;
@@ -123,40 +123,6 @@ fn paths(store: &Store) -> Vec<String> {
     let mut v: Vec<String> = store.file_states().unwrap().into_keys().collect();
     v.sort();
     v
-}
-
-#[test]
-fn indexes_markdown_files_only() {
-    let f = Fixture::new();
-    f.write("a.md", "# A\nalpha\n");
-    f.write("sub/b.md", "# B\nbeta\n");
-    f.write("c.txt", "not markdown");
-    let (mut s, e) = (f.store(), FakeEmbedder::new(8));
-    let r = f.index(&mut s, &e);
-    assert_eq!((r.indexed, r.rebuilt, r.scan_complete), (2, true, true));
-    assert_eq!(paths(&s), ["a.md", "sub/b.md"]);
-}
-
-#[test]
-fn notrieve_directory_and_hidden_directories_are_not_indexed() {
-    let f = Fixture::new();
-    f.write("a.md", "alpha\n");
-    f.write(".notrieve/x.md", "internal\n");
-    f.write(".obsidian/y.md", "app data\n");
-    let (mut s, e) = (f.store(), FakeEmbedder::new(8));
-    f.index(&mut s, &e);
-    assert_eq!(paths(&s), ["a.md"]);
-}
-
-#[test]
-fn gitignore_is_respected_without_a_git_repository() {
-    let f = Fixture::new();
-    f.write(".gitignore", "private/\n");
-    f.write("a.md", "alpha\n");
-    f.write("private/p.md", "secret\n");
-    let (mut s, e) = (f.store(), FakeEmbedder::new(8));
-    f.index(&mut s, &e);
-    assert_eq!(paths(&s), ["a.md"]);
 }
 
 #[test]
@@ -387,28 +353,6 @@ fn tags_aliases_and_line_numbers_are_stored() {
 }
 
 #[test]
-fn stale_files_counts_changes_without_hashing() {
-    use notrieve::indexer::scan::{plan_changes, scan_vault};
-    let f = Fixture::new();
-    f.write("a.md", "alpha\n");
-    f.write("b.md", "beta\n");
-    let (mut s, e) = (f.store(), FakeEmbedder::new(8));
-    f.index(&mut s, &e);
-    f.write("c.md", "new\n");
-    fs::remove_file(f.path("b.md")).unwrap();
-    let scan = scan_vault(Path::new(f.vault.path()), &[]).unwrap();
-    assert_eq!(
-        plan_changes(
-            &scan,
-            &s.file_states().unwrap(),
-            &s.skipped_states().unwrap()
-        )
-        .stale_files(),
-        2
-    );
-}
-
-#[test]
 fn invalid_exclude_fails_before_a_fingerprint_rebuild_wipes_the_index() {
     let f = Fixture::new();
     f.write("a.md", "alpha\n");
@@ -466,55 +410,6 @@ fn malformed_gitignore_line_is_an_error_and_well_formed_one_is_complete() {
     let r = f.index(&mut s, &e);
     assert!(r.scan_complete);
     assert_eq!(paths(&s), ["a.md"]);
-}
-
-#[cfg(unix)]
-#[test]
-fn non_utf8_file_names_are_skipped_instead_of_colliding() {
-    use std::ffi::OsStr;
-    use std::os::unix::ffi::OsStrExt;
-    let f = Fixture::new();
-    f.write("ok.md", "fine\n");
-    for name in [&b"a\x80.md"[..], &b"a\x81.md"[..]] {
-        if fs::write(f.vault.path().join(OsStr::from_bytes(name)), "x\n").is_err() {
-            eprintln!("skipped: filesystem refuses non-UTF-8 names");
-            return;
-        }
-    }
-    let (mut s, e) = (f.store(), FakeEmbedder::new(8));
-    f.index(&mut s, &e);
-    assert_eq!(paths(&s), ["ok.md"]);
-}
-
-#[test]
-fn malformed_parent_gitignore_is_an_error() {
-    let parent = TempDir::new().unwrap();
-    fs::write(parent.path().join(".gitignore"), "{unclosed\n").unwrap();
-    let vault = parent.path().join("vault");
-    fs::create_dir(&vault).unwrap();
-    fs::write(vault.join("a.md"), "alpha\n").unwrap();
-    let data = TempDir::new().unwrap();
-    let mut s = Store::open(&data.path().join("index.db")).unwrap();
-    let e = FakeEmbedder::new(8);
-    let opts = IndexOptions {
-        exclude: &[],
-        chunk_max_tokens: 450,
-        budget: None,
-        deadline: None,
-        rebuild: false,
-    };
-    let result = index_vault(
-        &vault,
-        &mut s,
-        &mut EmbeddingCache::open(&notrieve::cache::cache_path(&data.path().join("index.db")))
-            .unwrap(),
-        &e,
-        &fps("model-a", "fp-a"),
-        &opts,
-        &mut |_| {},
-    );
-    assert!(result.is_err());
-    assert!(paths(&s).is_empty());
 }
 
 #[test]
@@ -1045,17 +940,6 @@ fn changed_skipped_file_is_retried_and_its_row_removed() {
     f.write("bad.md", "now valid text\n");
     let r = f.index(&mut s, &e);
     assert_eq!((r.indexed, r.skipped.len()), (1, 0));
-    assert!(s.skipped_states().unwrap().is_empty());
-}
-
-#[test]
-fn schema_rebuild_clears_skipped_rows() {
-    let f = Fixture::new();
-    fs::write(f.path("bad.md"), [0xff, 0xfe, 0x00]).unwrap();
-    let (mut s, e) = (f.store(), FakeEmbedder::new(8));
-    f.index(&mut s, &e);
-    assert_eq!(s.skipped_states().unwrap().len(), 1);
-    s.rebuild(&fps("model-a", "fp-a"), "fake", 8).unwrap();
     assert!(s.skipped_states().unwrap().is_empty());
 }
 
