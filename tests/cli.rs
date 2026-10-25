@@ -98,6 +98,35 @@ fn later_vault_is_default_only_when_requested() {
     assert!(defaults[0].starts_with("c\t"), "{list}");
 }
 
+const REMOTE_CONFIG: &str = "chunk_max_tokens = 1500\n[model]\nsource = \"openai-compat:https://api.example.com/v1\"\nremote_model = \"m\"\napi_key_env = \"EXAMPLE_KEY\"\n";
+
+#[test]
+fn adding_a_vault_shows_where_it_sends_notes() {
+    let env = Env::new();
+    let root = env.vault("team");
+    fs::write(root.join(".notrieve/config.toml"), REMOTE_CONFIG).unwrap();
+    let out = env.run(env.home.path(), &["vault", "add", root.to_str().unwrap()]);
+    let text = stdout(&out);
+    assert!(
+        text.contains("api.example.com") && text.contains("EXAMPLE_KEY"),
+        "{text}"
+    );
+}
+
+#[test]
+fn search_in_an_unregistered_vault_with_a_remote_model_asks_to_register_it() {
+    let env = Env::new();
+    let root = env.vault("team");
+    fs::write(root.join(".notrieve/config.toml"), REMOTE_CONFIG).unwrap();
+    let out = env.run(&root, &["search", "anything"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        stderr(&out).contains("notrieve vault add"),
+        "{}",
+        stderr(&out)
+    );
+}
+
 #[test]
 fn adding_a_directory_without_notrieve_fails() {
     let env = Env::new();
@@ -273,6 +302,7 @@ fn mcp_outside_any_vault_answers_tools_with_the_vault_error_and_keeps_stdout_to_
     );
 }
 
+/// Registered, since a vault with a remote model is used from the working directory only then.
 fn remote_vault(env: &Env, name: &str, base: &str) -> PathBuf {
     let root = env.dir(name);
     fs::create_dir_all(root.join(".notrieve")).unwrap();
@@ -281,6 +311,8 @@ fn remote_vault(env: &Env, name: &str, base: &str) -> PathBuf {
         remote_config(base, "", ""),
     )
     .unwrap();
+    let out = env.run(env.home.path(), &["vault", "add", root.to_str().unwrap()]);
+    assert!(out.status.success(), "{}", stderr(&out));
     root
 }
 
@@ -358,6 +390,7 @@ fn verbose_logging_does_not_print_the_api_key() {
             ),
         )
         .unwrap();
+        env.run(env.home.path(), &["vault", "add", root.to_str().unwrap()]);
         fs::write(root.join("a.md"), "# A\nalpha\n").unwrap();
         let o = env
             .command(&root, &["index"])

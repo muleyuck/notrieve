@@ -16,6 +16,13 @@ pub enum Error {
     DuplicateVaultName(String),
     #[error("{0} has no .notrieve/config.toml")]
     NotAVault(PathBuf),
+    #[error(
+        "the vault at {} is not registered, and its config {settings}; check {}/.notrieve/config.toml and run `notrieve vault add {}` if you trust it",
+        .root.display(),
+        .root.display(),
+        .root.display()
+    )]
+    UntrustedVault { root: PathBuf, settings: String },
     #[error("configuration error: {0}")]
     Config(String),
     #[error("another notrieve process is updating the index")]

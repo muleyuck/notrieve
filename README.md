@@ -136,6 +136,14 @@ it. `http://` is accepted only for `localhost`, `127.0.0.1` and `::1`. The base 
 a query string or a fragment. The API key never appears in error messages or logs, and
 configuration errors do not repeat the URL.
 
+`.notrieve/config.toml` travels with your notes, so a vault you cloned or synced may carry
+someone else's settings. A remote model, or a `db_path` outside the vault, is used only for a
+vault in your registry. `notrieve init` registers the vault it creates; `notrieve vault add <dir>`
+registers an existing one and prints where its config sends notes and which environment variable
+it sends. In an unregistered vault, commands stop with an error before contacting anything.
+Registering trusts the directory, not one version of its config, so review changes to
+`.notrieve/config.toml` that you pull from others.
+
 When the API is slow or unreachable, `notrieve mcp` keeps serving: searches fall back to
 full-text matching, and the background indexer waits and retries. While it waits, search
 responses carry `indexer_error: "the background indexer paused for <delay>: <reason>"`.

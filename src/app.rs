@@ -68,14 +68,16 @@ pub fn init(cwd: &Path, name: Option<&str>, make_default: bool, paths: &Paths) -
     Vault::load(&root, Some(name))
 }
 
+/// Returns the registered name and the settings registering trusts
+/// (`Vault::settings_needing_trust`), for the user to review.
 pub fn add_vault(
     path: &Path,
     name: Option<&str>,
     make_default: bool,
     paths: &Paths,
-) -> Result<String> {
+) -> Result<(String, Vec<String>)> {
     let root = path.canonicalize().map_err(|e| Error::io(path, e))?;
-    Vault::load(&root, None)?;
+    let settings = Vault::load(&root, None)?.settings_needing_trust();
     let name = match name {
         Some(name) => name.to_string(),
         None => dir_name(&root)?,
@@ -83,7 +85,7 @@ pub fn add_vault(
     Registry::update(&paths.registry, |registry| {
         registry.add(&name, &root, make_default)
     })?;
-    Ok(name)
+    Ok((name, settings))
 }
 
 pub fn remove_vault(name: &str, paths: &Paths) -> Result<PathBuf> {
