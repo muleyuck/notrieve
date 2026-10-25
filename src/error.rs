@@ -43,6 +43,10 @@ pub enum Error {
     )]
     DbCorrupt(PathBuf),
     #[error(
+        "{0} is a database of another program; notrieve leaves it untouched, so set db_path to another file"
+    )]
+    ForeignDatabase(PathBuf),
+    #[error(
         "the index was written by a newer notrieve (schema {found}, supported {supported}); update notrieve or run `notrieve index --rebuild`"
     )]
     SchemaTooNew { found: i64, supported: i64 },
