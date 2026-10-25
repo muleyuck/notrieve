@@ -40,3 +40,4 @@ tempfile = "3"
 [profile.dist]
 inherits = "release"
 lto = "thin"
+strip = true
