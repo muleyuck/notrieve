@@ -1,0 +1,12 @@
+name: unit-test
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+permissions: {}
+jobs:
+  unit-test:
+    permissions:
+      contents: read
+    uses: muleyuck/github-actions/.github/workflows/ci-rust.yml@v1

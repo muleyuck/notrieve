@@ -1,0 +1,13 @@
+name: audit-check
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+permissions: {}
+jobs:
+  audit-check:
+    permissions:
+      contents: read
+    uses: muleyuck/github-actions/.github/workflows/audit-rust.yml@v1

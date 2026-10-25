@@ -1,0 +1,32 @@
+name: eval
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+permissions: {}
+jobs:
+  eval:
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-14, ubuntu-24.04]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: muleyuck/github-actions/actions/rust/setup@v1
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/notrieve/models
+          # A model changed upstream without a fixture change is noticed only after the cache is evicted (7 days unused).
+          key: notrieve-model-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('tests/fixtures/reference-ruri-v3-30m.json') }}
+
+      - run: NOTRIEVE_TEST_MODEL=1 cargo test --locked --test reference_vectors --test real_model --test eval -- --nocapture

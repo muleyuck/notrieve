@@ -1,5 +1,29 @@
 # notrieve
 
+## Install
+
+Homebrew:
+
+```sh
+brew install muleyuck/tap/notrieve
+```
+
+From source (needs a Rust toolchain):
+
+```sh
+cargo install --git https://github.com/muleyuck/notrieve
+```
+
+Or download `notrieve-<target>.tar.xz` from [GitHub Releases](https://github.com/muleyuck/notrieve/releases),
+unpack it and put `notrieve` on your `PATH`. Targets: `aarch64-apple-darwin`,
+`aarch64-unknown-linux-gnu`, `x86_64-unknown-linux-gnu`.
+
+## Requirements
+
+- macOS 13.4 or later on Apple Silicon. Intel Macs are not supported.
+- Linux x86_64 or aarch64 with glibc 2.38 or later and `GLIBCXX_3.4.31` or later (Ubuntu 24.04 or
+  later). Ubuntu 22.04 does not work.
+
 ## Use from AI agents (MCP)
 
 `notrieve mcp` is a stdio MCP server, so any client that can launch one can use it. Claude Code and
@@ -24,6 +48,33 @@ args = ["mcp", "--vault", "<name>"]
 
 The server serves one vault. Register one server per vault (`notrieve vault list` shows the names).
 Without `--vault` it uses the vault containing the working directory, then the default vault.
+
+## Using another local model
+
+`model = "ruri-v3-30m"` in `.notrieve/config.toml` names the only built-in preset. To run another
+ONNX embedding model on this machine, replace that line with a `[model]` table. Every field is
+required. This is ruri-v3-130m (529 MB, 512 dimensions):
+
+```toml
+[model]
+source = "hf:sirasagi62/ruri-v3-130m-ONNX"
+id = "ruri-v3-130m"
+onnx_file = "onnx/model.onnx"
+dim = 512
+max_tokens = 512
+pooling = "mean"
+quantization = "none"
+query_prefix = "検索クエリ: "
+document_prefix = "検索文書: "
+```
+
+- `source` is `hf:<owner>/<repo>` (downloaded from Hugging Face) or `path:<dir>` (a directory,
+  relative to the vault root unless absolute). Either must hold `onnx_file` and `tokenizer.json`,
+  `config.json`, `special_tokens_map.json` and `tokenizer_config.json`.
+- `pooling` is `mean` or `cls`. `quantization` must be `none`; use an ONNX file that is already
+  quantized instead.
+- `notrieve model pull` downloads the files ahead of the first index. Changing the model rebuilds
+  the index.
 
 ## Embedding through an API instead of a local model
 
