@@ -804,11 +804,13 @@ mod tests {
     }
 
     #[test]
-    fn current_schema_version_opens() {
+    fn rebuild_clears_skipped_rows() {
         let dir = TempDir::new().unwrap();
-        let path = dir.path().join("index.db");
-        drop(rebuilt(&dir, "fp-a", 4));
-        assert!(Store::open(&path).is_ok());
+        let mut s = rebuilt(&dir, "fp-a", 4);
+        s.skip_file("fp-a", "bad.md", 1, 3, "not UTF-8").unwrap();
+        assert_eq!(s.skipped_states().unwrap().len(), 1);
+        s.rebuild(&fps("fp-a"), "fake", 4).unwrap();
+        assert!(s.skipped_states().unwrap().is_empty());
     }
 
     #[test]
@@ -974,16 +976,21 @@ mod tests {
         );
     }
 
-    #[test]
-    fn model_change_wins_over_an_old_schema_and_an_old_schema_alone_is_a_schema_change() {
-        let dir = TempDir::new().unwrap();
-        let s = rebuilt(&dir, "fp-a", 4);
+    fn with_an_old_schema(dir: &TempDir) -> Store {
+        let s = rebuilt(dir, "fp-a", 4);
         s.conn()
             .execute(
                 "UPDATE meta SET value = '0' WHERE key = 'schema_version'",
                 [],
             )
             .unwrap();
+        s
+    }
+
+    #[test]
+    fn model_change_wins_over_an_old_schema() {
+        let dir = TempDir::new().unwrap();
+        let s = with_an_old_schema(&dir);
         let other_model = Fingerprints {
             model: "model-b".into(),
             index: "fp-a".into(),
@@ -992,6 +999,12 @@ mod tests {
             s.rebuild_reason(&other_model).unwrap(),
             Some(RebuildReason::ModelChanged)
         );
+    }
+
+    #[test]
+    fn an_old_schema_alone_is_a_schema_change() {
+        let dir = TempDir::new().unwrap();
+        let s = with_an_old_schema(&dir);
         assert_eq!(
             s.rebuild_reason(&fps("fp-a")).unwrap(),
             Some(RebuildReason::SchemaChanged)

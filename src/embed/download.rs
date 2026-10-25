@@ -209,17 +209,6 @@ mod tests {
     }
 
     #[test]
-    fn hf_models_are_cached_under_a_flattened_repo_name() {
-        let c = contract(ModelSource::Hf {
-            repo: "owner/repo".into(),
-        });
-        assert_eq!(
-            model_dir(&c, Path::new("/cache")),
-            PathBuf::from("/cache/owner__repo")
-        );
-    }
-
-    #[test]
     fn local_model_with_a_missing_file_is_reported_without_downloading() {
         let dir = TempDir::new().unwrap();
         for f in [

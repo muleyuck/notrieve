@@ -48,7 +48,6 @@ uv run --script scripts/reference.py   # regenerate tests/fixtures/reference-rur
 |---|---|
 | `NOTRIEVE_TEST_MODEL=1` | `tests/real_model.rs`, `tests/reference_vectors.rs` (model comparison), `tests/eval.rs`, `tests/perf.rs`. Downloads ~150 MB on the first run. |
 | `NOTRIEVE_PERF=1` | `tests/perf.rs` as well (needs `NOTRIEVE_TEST_MODEL=1`; Apple Silicon). |
-| `NOTRIEVE_EVAL_COMPARE=1` | The candidate-model comparison in `tests/eval.rs` (with `NOTRIEVE_TEST_MODEL=1`). |
 | `NOTRIEVE_TEST_REMOTE=1` | `tests/real_remote.rs` against a real API, with `NOTRIEVE_TEST_REMOTE_SOURCE`, `NOTRIEVE_TEST_REMOTE_MODEL` and, if the API needs a key, `NOTRIEVE_TEST_REMOTE_KEY_ENV`. |
 | `NOTRIEVE_TEST_TEI_SOURCE` | `tests/real_remote.rs` against Text Embeddings Inference serving `cl-nagoya/ruri-v3-30m` (with `NOTRIEVE_TEST_MODEL=1`). |
 

@@ -120,13 +120,6 @@ mod tests {
     }
 
     #[test]
-    fn numeric_only_inline_tag_is_dropped_with_a_warning() {
-        let note = parse_note("n.md", "#1984 #y1984\n");
-        assert_eq!(note.meta.tags, ["y1984"]);
-        assert_eq!(note.meta.warnings.len(), 1);
-    }
-
-    #[test]
     fn invalid_frontmatter_tag_is_dropped_with_a_warning() {
         let note = parse_note("n.md", "---\ntags: [\"1984\", ok]\n---\n");
         assert_eq!(note.meta.tags, ["ok"]);

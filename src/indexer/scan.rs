@@ -170,10 +170,25 @@ fn is_rule_error(err: &ignore::Error) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{Scan, ScanEntry, is_rule_error, plan_changes};
-    use crate::store::SkippedState;
+    use super::{Scan, ScanEntry, is_rule_error, plan_changes, scan_vault};
+    use crate::Error;
+    use crate::store::{FileState, SkippedState};
     use ignore::Error as E;
     use std::collections::HashMap;
+    use std::fs;
+    use std::path::Path;
+    use tempfile::TempDir;
+
+    fn write(root: &Path, rel: &str) {
+        let path = root.join(rel);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, "x\n").unwrap();
+    }
+
+    fn rels(root: &Path) -> Vec<String> {
+        let scan = scan_vault(root, &[]).unwrap();
+        scan.entries.into_iter().map(|e| e.rel).collect()
+    }
 
     fn scan_of(size: i64) -> Scan {
         Scan {
@@ -216,7 +231,6 @@ mod tests {
 
     #[test]
     fn skipped_row_decides_alone_even_when_the_files_row_matches() {
-        use crate::store::FileState;
         let states = HashMap::from([(
             "bad.md".to_string(),
             FileState {
@@ -289,5 +303,88 @@ mod tests {
             err: Box::new(io),
         };
         assert!(!is_rule_error(&wrapped));
+    }
+
+    #[test]
+    fn only_markdown_files_are_listed() {
+        let dir = TempDir::new().unwrap();
+        for rel in ["a.md", "sub/b.md", "c.txt"] {
+            write(dir.path(), rel);
+        }
+        assert_eq!(rels(dir.path()), ["a.md", "sub/b.md"]);
+    }
+
+    #[test]
+    fn notrieve_directory_and_hidden_directories_are_not_listed() {
+        let dir = TempDir::new().unwrap();
+        for rel in ["a.md", ".notrieve/x.md", ".obsidian/y.md"] {
+            write(dir.path(), rel);
+        }
+        assert_eq!(rels(dir.path()), ["a.md"]);
+    }
+
+    #[test]
+    fn gitignore_is_respected_without_a_git_repository() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join(".gitignore"), "private/\n").unwrap();
+        for rel in ["a.md", "private/p.md"] {
+            write(dir.path(), rel);
+        }
+        assert_eq!(rels(dir.path()), ["a.md"]);
+    }
+
+    #[test]
+    fn malformed_parent_gitignore_is_an_error() {
+        let parent = TempDir::new().unwrap();
+        fs::write(parent.path().join(".gitignore"), "{unclosed\n").unwrap();
+        let vault = parent.path().join("vault");
+        write(&vault, "a.md");
+        assert!(matches!(scan_vault(&vault, &[]), Err(Error::Config(_))));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_file_names_are_skipped_instead_of_colliding() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+        let dir = TempDir::new().unwrap();
+        write(dir.path(), "ok.md");
+        for name in [&b"a\x80.md"[..], &b"a\x81.md"[..]] {
+            if fs::write(dir.path().join(OsStr::from_bytes(name)), "x\n").is_err() {
+                eprintln!("skipped: filesystem refuses non-UTF-8 names");
+                return;
+            }
+        }
+        assert_eq!(rels(dir.path()), ["ok.md"]);
+    }
+
+    #[test]
+    fn stale_files_counts_new_and_deleted_files() {
+        let state = |size| FileState {
+            mtime_ns: 10,
+            size,
+            content_hash: "h".into(),
+            title: "t".into(),
+        };
+        let scan = Scan {
+            entries: ["a.md", "c.md"]
+                .map(|rel| ScanEntry {
+                    rel: rel.into(),
+                    abs: rel.into(),
+                    mtime_ns: 10,
+                    size: 3,
+                })
+                .to_vec(),
+            complete: true,
+            errors: Vec::new(),
+        };
+        let states = HashMap::from([
+            ("a.md".to_string(), state(3)),
+            ("b.md".to_string(), state(3)),
+        ]);
+        assert_eq!(
+            plan_changes(&scan, &states, &HashMap::new()).stale_files(),
+            2
+        );
     }
 }
