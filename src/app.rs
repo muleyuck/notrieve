@@ -227,7 +227,7 @@ pub fn search_vault<E: Embedder + ?Sized>(
             Err(e) => return Err(e),
         }
     }
-    let reader = search::open_reader(&db)?;
+    let reader = Store::open_reader(&db)?;
     let scan = scan_vault(&vault.root, &vault.config.exclude)?;
     let stale_files = count_stale(&scan, &reader)?;
     // Our own lock was released above, so a held lock belongs to another process (spec §4.5).

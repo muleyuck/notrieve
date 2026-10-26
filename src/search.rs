@@ -1,14 +1,13 @@
 //! Hybrid search (spec §4.5): FTS5 trigram and LIKE for text, cosine distance over the embedding
 //! cache for vectors, fused with reciprocal rank fusion.
 use std::collections::HashMap;
-use std::path::Path;
 use std::time::Instant;
 
 use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension, params_from_iter};
 use serde::Serialize;
 
-use crate::cache::{cache_path, f32_blob};
+use crate::cache::f32_blob;
 use crate::embed::Embedder;
 use crate::error::RemoteErrorKind;
 use crate::store::Store;
@@ -174,23 +173,7 @@ impl SearchResults {
     }
 }
 
-/// Opens the index for searching, with its embedding cache attached as `cache`.
-pub fn open_reader(db_path: &Path) -> Result<Store> {
-    let cache = cache_path(db_path);
-    if !cache.is_file() {
-        return Err(Error::IndexNotReady);
-    }
-    let store = Store::open(db_path)?;
-    let cache = cache
-        .to_str()
-        .ok_or_else(|| Error::Config(format!("{} is not valid UTF-8", cache.display())))?;
-    store
-        .conn()
-        .execute("ATTACH DATABASE ?1 AS cache", [cache])?;
-    Ok(store)
-}
-
-/// `store` must come from `open_reader`; `fingerprint` is this process's index fingerprint.
+/// `store` must come from `Store::open_reader`; `fingerprint` is this process's index fingerprint.
 /// `deadline` bounds embedding the query with a remote model.
 pub fn search<E: Embedder + ?Sized>(
     store: &Store,
@@ -205,10 +188,10 @@ pub fn search<E: Embedder + ?Sized>(
     // first read, so the cache goes first: a writer between the two reads can then only add chunks
     // whose vectors this snapshot lacks (they drop out of the vector side), never leave old chunks
     // whose vectors a garbage collection already removed.
-    let tx = store.conn().unchecked_transaction()?;
+    let tx = store.read_snapshot()?;
     tx.query_row("SELECT 1 FROM cache.embeddings LIMIT 1", [], |_| Ok(()))
         .optional()?;
-    if stored_fingerprint(&tx)?.as_deref() != Some(fingerprint) {
+    if store.fingerprint()?.as_deref() != Some(fingerprint) {
         return Err(Error::IndexNotReady);
     }
     let (vector, vector_error) = match embedder.embed_query_within(text, deadline) {
@@ -259,24 +242,6 @@ fn check_query_dim(conn: &Connection, dim: usize) -> Result<()> {
         }),
         _ => Ok(()),
     }
-}
-
-fn stored_fingerprint(conn: &Connection) -> Result<Option<String>> {
-    let has_meta: i64 = conn.query_row(
-        "SELECT count(*) FROM main.sqlite_master WHERE type = 'table' AND name = 'meta'",
-        [],
-        |r| r.get(0),
-    )?;
-    if has_meta == 0 {
-        return Ok(None);
-    }
-    Ok(conn
-        .query_row(
-            "SELECT value FROM meta WHERE key = 'index_fingerprint'",
-            [],
-            |r| r.get(0),
-        )
-        .optional()?)
 }
 
 /// A WHERE fragment over `chunks c JOIN files f`, applied before candidates are cut (spec §4.5).

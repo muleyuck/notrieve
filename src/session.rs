@@ -14,7 +14,6 @@ use crate::note::{NoteText, read_note};
 use crate::search::{self, IndexState, SearchQuery, SearchResponse};
 use crate::store::Store;
 use crate::{Error, Result};
-use rusqlite::OptionalExtension;
 
 /// MCP has no `search_budget_ms`; a remote query gets this long (remote spec §5.3; a guess).
 pub const MCP_QUERY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -73,12 +72,14 @@ impl Session {
         query.validate()?;
         let seen = self.updater.observe()?;
         refuse_while_unusable(&seen.status)?;
-        let reader = self.open_index(seen.status.synced, search::open_reader)?;
+        let reader = self.open_index(seen.status.synced, Store::open_reader)?;
         // `index_vault` rebuilds when the schema or the cache is not the one the index was built
         // against (spec §4.1). The search fingerprint does not cover the schema, and a replaced
         // cache leaves no stale file, so the search path has to notice both and ask for that
         // rebuild (`not_ready` requests a run). A cache that cannot be queried is replaced too.
-        if reader.rebuild_reason(&self.fps)?.is_some() || !cache_matches(&reader).unwrap_or(false) {
+        if reader.rebuild_reason(&self.fps)?.is_some()
+            || !reader.attached_cache_matches().unwrap_or(false)
+        {
             return Err(self.not_ready()?);
         }
         self.updater.mark_synced();
@@ -150,7 +151,7 @@ impl Session {
         // One read snapshot: a rebuild committed between the two checks would otherwise let rows
         // the fingerprint check never saw authorize the path.
         let indexed = {
-            let _snapshot = store.conn().unchecked_transaction()?;
+            let _snapshot = store.read_snapshot()?;
             match store.rebuild_reason(&self.fps)? {
                 Some(_) => None,
                 None => Some(store.has_file(path)?),
@@ -166,7 +167,7 @@ impl Session {
 
     /// Opens the index with `open`, mapping the failures `search` and `get_note` share. After the
     /// sync, a newer schema means another process rebuilt the index with a newer notrieve. A cache
-    /// replaced by an unreadable file fails the ATTACH of `open_reader`; the updater discards it.
+    /// replaced by an unreadable file fails the ATTACH of `Store::open_reader`; the updater discards it.
     fn open_index<T>(&self, synced: bool, open: impl FnOnce(&Path) -> Result<T>) -> Result<T> {
         match open(&self.vault.db_path()) {
             Err(Error::SchemaTooNew { .. }) if synced => Err(Error::FingerprintChanged),
@@ -225,17 +226,4 @@ fn refuse_while_unusable(status: &UpdaterStatus) -> Result<()> {
         });
     }
     Ok(())
-}
-
-/// Whether the attached cache (`open_reader`) is the one the index was built against.
-fn cache_matches(reader: &Store) -> Result<bool> {
-    let attached: Option<String> = reader
-        .conn()
-        .query_row(
-            "SELECT value FROM cache.meta WHERE key = 'cache_id'",
-            [],
-            |r| r.get(0),
-        )
-        .optional()?;
-    Ok(attached.is_some() && attached == reader.cache_id()?)
 }

@@ -220,6 +220,6 @@ fn unindexable_file_does_not_keep_the_index_stale() {
     .unwrap();
     assert_eq!((r.stale_files, r.index_state), (0, IndexState::Fresh));
     assert!(r.results.iter().any(|x| x.path == "bad.md"));
-    let store = notrieve::search::open_reader(&vault.db_path()).unwrap();
+    let store = notrieve::store::Store::open_reader(&vault.db_path()).unwrap();
     assert!(store.skipped_states().unwrap().is_empty());
 }

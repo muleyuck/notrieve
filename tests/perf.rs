@@ -16,7 +16,7 @@ use notrieve::embed::onnx::resolve_threads;
 use notrieve::embed::{Embedder, OnnxEmbedder};
 use notrieve::fingerprint::{Fingerprints, fingerprints};
 use notrieve::indexer::{IndexOptions, index_vault};
-use notrieve::search::{DEFAULT_K, SearchQuery, open_reader, search};
+use notrieve::search::{DEFAULT_K, SearchQuery, search};
 use notrieve::store::{RebuildReason, Store};
 use support::enabled;
 use tempfile::TempDir;
@@ -184,7 +184,7 @@ fn ten_thousand_files_rebuild_from_the_cache_in_30_seconds_and_search_within_the
     assert!(took < REBUILD_LIMIT, "rebuild took {took:?}");
     drop(store);
 
-    let reader = open_reader(&db).unwrap();
+    let reader = Store::open_reader(&db).unwrap();
     for text in [
         "会議の議事録",
         "紅葉を見に行く",

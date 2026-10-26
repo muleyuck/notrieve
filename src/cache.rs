@@ -45,6 +45,17 @@ pub struct EmbeddingCache {
     id: String,
 }
 
+/// The cache id stored in `table`: `meta` in the cache itself, `cache.meta` where
+/// `Store::open_reader` attached it to the index.
+pub(crate) fn read_cache_id(conn: &Connection, table: &str) -> rusqlite::Result<Option<String>> {
+    conn.query_row(
+        &format!("SELECT value FROM {table} WHERE key = 'cache_id'"),
+        [],
+        |r| r.get(0),
+    )
+    .optional()
+}
+
 /// Unique per created cache; index.db records it to notice a cache that was replaced.
 fn new_cache_id(path: &Path) -> String {
     let now = SystemTime::now()
@@ -108,10 +119,8 @@ impl EmbeddingCache {
             tx.execute_batch(&format!("PRAGMA user_version = {CACHE_SCHEMA_VERSION};"))?;
             tx.commit()?;
         }
-        let id: String = conn
-            .query_row("SELECT value FROM meta WHERE key = 'cache_id'", [], |r| {
-                r.get(0)
-            })
+        let id = read_cache_id(&conn, "meta")
+            .and_then(|id| id.ok_or(rusqlite::Error::QueryReturnedNoRows))
             .map_err(|e| classify(e, path))?;
         Ok(Self { conn, created, id })
     }
