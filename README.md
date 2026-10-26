@@ -32,10 +32,11 @@ Codex are shown below.
 Run `notrieve init` in your notes directory first. It downloads the model and builds the index, so
 the MCP server starts quickly.
 
-Claude Code:
+Claude Code (`--scope user` makes the notes searchable from every project; without it the
+server is added to the current project only):
 
 ```sh
-claude mcp add notrieve -- notrieve mcp --vault <name>
+claude mcp add --scope user notrieve -- notrieve mcp --vault <name>
 ```
 
 Codex (`~/.codex/config.toml`, or `codex mcp add notrieve -- notrieve mcp --vault <name>`):
