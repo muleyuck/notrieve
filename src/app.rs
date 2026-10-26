@@ -7,7 +7,7 @@ use crate::embed::download::{DownloadEvent, ensure_model, with_model};
 use crate::embed::onnx::resolve_threads;
 use crate::embed::{Embedder, OnnxEmbedder, RemoteEmbedder};
 use crate::fingerprint::{Fingerprints, fingerprints, remote_fingerprints};
-use crate::indexer::scan::{plan_changes, scan_vault};
+use crate::indexer::scan::{count_stale, scan_vault};
 use crate::indexer::{self, IndexEvent, IndexOptions, IndexReport, Progress};
 use crate::lock;
 use crate::search::{self, IndexState, SearchQuery, SearchResponse};
@@ -235,28 +235,22 @@ pub fn search_vault<E: Embedder + ?Sized>(
     }
     let reader = search::open_reader(&db)?;
     let scan = scan_vault(&vault.root, &vault.config.exclude)?;
-    let stale_files =
-        plan_changes(&scan, &reader.file_states()?, &reader.skipped_states()?).stale_files();
+    let stale_files = count_stale(&scan, &reader)?;
     // Our own lock was released above, so a held lock belongs to another process (spec §4.5).
-    let index_state = if !scan.complete {
-        IndexState::ScanError
-    } else if lock::try_lock(&vault.lock_path())?.is_none() {
-        IndexState::UpdatingElsewhere
-    } else if stale_files == 0 {
-        IndexState::Fresh
-    } else {
-        IndexState::IdleStale
-    };
+    let index_state = IndexState::classify(
+        scan.complete,
+        false,
+        || Ok(lock::try_lock(&vault.lock_path())?.is_none()),
+        stale_files,
+    )?;
     let query_deadline = remote.then(|| (started + budget).max(Instant::now() + QUERY_RESERVE));
     let found = search::search(&reader, embedder, &fps.index, query, query_deadline)?;
-    Ok(SearchResponse {
-        vector_search: found.vector_search(),
-        vector_error: found.vector_error,
-        results: found.hits,
+    Ok(SearchResponse::new(
+        found,
         stale_files,
         index_state,
         indexer_error,
-    })
+    ))
 }
 
 /// Loads the vault's model and computes its fingerprints. A local model is read while the model

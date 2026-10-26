@@ -82,6 +82,27 @@ pub enum IndexState {
 }
 
 impl IndexState {
+    /// Spec §4.5, in this order. `updating_here` is this process's own background indexer (MCP);
+    /// `locked_elsewhere` is asked only when nothing before it decided.
+    pub fn classify(
+        scan_complete: bool,
+        updating_here: bool,
+        locked_elsewhere: impl FnOnce() -> Result<bool>,
+        stale_files: usize,
+    ) -> Result<Self> {
+        Ok(if !scan_complete {
+            IndexState::ScanError
+        } else if updating_here {
+            IndexState::Updating
+        } else if locked_elsewhere()? {
+            IndexState::UpdatingElsewhere
+        } else if stale_files == 0 {
+            IndexState::Fresh
+        } else {
+            IndexState::IdleStale
+        })
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             IndexState::Fresh => "fresh",
@@ -116,6 +137,24 @@ pub struct SearchResponse {
     /// Why `vector_search` is `unavailable`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub vector_error: Option<String>,
+}
+
+impl SearchResponse {
+    pub fn new(
+        found: SearchResults,
+        stale_files: usize,
+        index_state: IndexState,
+        indexer_error: Option<String>,
+    ) -> Self {
+        Self {
+            vector_search: found.vector_search(),
+            vector_error: found.vector_error,
+            results: found.hits,
+            stale_files,
+            index_state,
+            indexer_error,
+        }
+    }
 }
 
 /// What `search` found, and why the vector side was left out when it was.
@@ -503,6 +542,25 @@ mod tests {
                 &serde_json::json!("down")
             )
         );
+    }
+
+    #[test]
+    fn index_state_asks_about_other_processes_only_when_nothing_before_decides() {
+        let never = || -> Result<bool> { panic!("the lock was probed") };
+        let state = |complete, here, elsewhere: bool, stale| {
+            IndexState::classify(complete, here, || Ok(elsewhere), stale).unwrap()
+        };
+        assert_eq!(
+            IndexState::classify(false, true, never, 0).unwrap(),
+            IndexState::ScanError
+        );
+        assert_eq!(
+            IndexState::classify(true, true, never, 0).unwrap(),
+            IndexState::Updating
+        );
+        assert_eq!(state(true, false, true, 0), IndexState::UpdatingElsewhere);
+        assert_eq!(state(true, false, false, 0), IndexState::Fresh);
+        assert_eq!(state(true, false, false, 2), IndexState::IdleStale);
     }
 
     #[test]

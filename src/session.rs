@@ -7,7 +7,7 @@ use crate::app::{self, Event, Paths};
 use crate::config::Vault;
 use crate::embed::Embedder;
 use crate::fingerprint::Fingerprints;
-use crate::indexer::scan::{plan_changes, scan_vault};
+use crate::indexer::scan::{count_stale, scan_vault};
 use crate::indexer::updater::{Updater, changed_elsewhere};
 use crate::note::{NoteText, read_note};
 use crate::search::{self, IndexState, SearchQuery, SearchResponse};
@@ -104,19 +104,13 @@ impl Session {
         for err in &scan.errors {
             tracing::warn!("{err}");
         }
-        let stale_files =
-            plan_changes(&scan, &reader.file_states()?, &reader.skipped_states()?).stale_files();
-        let index_state = if !scan.complete {
-            IndexState::ScanError
-        } else if seen.status.running {
-            IndexState::Updating
-        } else if seen.locked_elsewhere {
-            IndexState::UpdatingElsewhere
-        } else if stale_files == 0 {
-            IndexState::Fresh
-        } else {
-            IndexState::IdleStale
-        };
+        let stale_files = count_stale(&scan, &reader)?;
+        let index_state = IndexState::classify(
+            scan.complete,
+            seen.status.running,
+            || Ok(seen.locked_elsewhere),
+            stale_files,
+        )?;
         // Not gated on `seen`: the run may have ended during the scan, and requests coalesce.
         if stale_files > 0 {
             self.updater.request();
@@ -145,14 +139,12 @@ impl Session {
                 remaining: after.remaining,
             });
         }
-        Ok(SearchResponse {
-            vector_search: found.vector_search(),
-            vector_error: found.vector_error,
-            results: found.hits,
+        Ok(SearchResponse::new(
+            found,
             stale_files,
             index_state,
-            indexer_error: seen.status.last_error,
-        })
+            seen.status.last_error,
+        ))
     }
 
     pub fn get_note(
