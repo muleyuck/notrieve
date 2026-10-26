@@ -41,9 +41,8 @@ enum Command {
     },
     /// Update the index
     Index {
-        /// Registered vault to use (default: the vault containing the current directory, then the default vault)
-        #[arg(long)]
-        vault: Option<String>,
+        #[command(flatten)]
+        vault: VaultArg,
         /// Drop and rebuild the index (also recovers an unreadable database)
         #[arg(long)]
         rebuild: bool,
@@ -54,9 +53,8 @@ enum Command {
     /// Search the vault (changed notes are indexed first, within search_budget_ms)
     Search {
         query: String,
-        /// Registered vault to use (default: the vault containing the current directory, then the default vault)
-        #[arg(long)]
-        vault: Option<String>,
+        #[command(flatten)]
+        vault: VaultArg,
         /// Number of results (1-50)
         #[arg(short, default_value_t = DEFAULT_K as u8, value_parser = clap::value_parser!(u8).range(1..=MAX_K as i64))]
         k: u8,
@@ -82,19 +80,24 @@ enum Command {
     },
     /// Serve one vault over MCP (stdio) to AI agents such as Claude Code and Codex
     Mcp {
-        /// Registered vault to use (default: the vault containing the current directory, then the default vault)
-        #[arg(long)]
-        vault: Option<String>,
+        #[command(flatten)]
+        vault: VaultArg,
     },
+}
+
+#[derive(clap::Args)]
+struct VaultArg {
+    /// Registered vault to use (default: the vault containing the current directory, then the default vault)
+    #[arg(long)]
+    vault: Option<String>,
 }
 
 #[derive(Subcommand)]
 enum ModelCommand {
     /// Download the model files into the cache
     Pull {
-        /// Registered vault to use (default: the vault containing the current directory, then the default vault)
-        #[arg(long)]
-        vault: Option<String>,
+        #[command(flatten)]
+        vault: VaultArg,
         /// Download again even when the cached files are complete
         #[arg(long)]
         force: bool,
@@ -189,7 +192,10 @@ fn run(cli: Cli) -> Result<()> {
             if no_index {
                 println!(
                     "edit {} and then run `notrieve index`",
-                    vault.config_dir().join("config.toml").display()
+                    vault
+                        .config_dir()
+                        .join(notrieve::config::CONFIG_FILE)
+                        .display()
                 );
             } else {
                 let request = IndexRequest {
@@ -205,7 +211,7 @@ fn run(cli: Cli) -> Result<()> {
             rebuild,
             no_wait,
         } => {
-            let vault = app::open_vault(vault.as_deref(), &cwd, &paths)?;
+            let vault = app::open_vault(vault.vault.as_deref(), &cwd, &paths)?;
             let request = IndexRequest {
                 rebuild,
                 wait: !no_wait,
@@ -221,7 +227,7 @@ fn run(cli: Cli) -> Result<()> {
             path,
             json,
         } => {
-            let vault = app::open_vault(vault.as_deref(), &cwd, &paths)?;
+            let vault = app::open_vault(vault.vault.as_deref(), &cwd, &paths)?;
             let query = SearchQuery {
                 text: query,
                 k: k as usize,
@@ -249,7 +255,7 @@ fn run(cli: Cli) -> Result<()> {
         }
         Command::Mcp { vault } => {
             // stdout carries the protocol; progress and errors go to stderr (spec §6).
-            let server = match app::open_vault(vault.as_deref(), &cwd, &paths)
+            let server = match app::open_vault(vault.vault.as_deref(), &cwd, &paths)
                 .and_then(|vault| Session::start(vault, &paths, &mut print_event))
             {
                 Ok(session) => NotrieveServer::new(Arc::new(session)),
@@ -271,7 +277,7 @@ fn run(cli: Cli) -> Result<()> {
         Command::Model {
             command: ModelCommand::Pull { vault, force },
         } => {
-            let vault = app::open_vault(vault.as_deref(), &cwd, &paths)?;
+            let vault = app::open_vault(vault.vault.as_deref(), &cwd, &paths)?;
             match app::pull_model(&vault, &paths, force, &mut print_event)? {
                 PullOutcome::Downloaded(dir) => println!("model files are in {}", dir.display()),
                 PullOutcome::Remote { host } => {

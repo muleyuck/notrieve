@@ -54,10 +54,7 @@ pub fn open_vault(explicit: Option<&str>, cwd: &Path, paths: &Paths) -> Result<V
 
 pub fn init(cwd: &Path, name: Option<&str>, make_default: bool, paths: &Paths) -> Result<Vault> {
     let root = cwd.canonicalize().map_err(|e| Error::io(cwd, e))?;
-    let name = match name {
-        Some(name) => name.to_string(),
-        None => dir_name(&root)?,
-    };
+    let name = vault_name(name, &root)?;
     Registry::update(&paths.registry, |registry| {
         if registry.vaults.contains_key(&name) {
             return Err(Error::DuplicateVaultName(name.clone()));
@@ -78,10 +75,7 @@ pub fn add_vault(
 ) -> Result<(String, Vec<String>)> {
     let root = path.canonicalize().map_err(|e| Error::io(path, e))?;
     let settings = Vault::load(&root, None)?.trusted_settings();
-    let name = match name {
-        Some(name) => name.to_string(),
-        None => dir_name(&root)?,
-    };
+    let name = vault_name(name, &root)?;
     Registry::update(&paths.registry, |registry| {
         let registered = registry
             .vaults
@@ -316,6 +310,14 @@ fn acquire(
     }
     on_event(Event::WaitingForLock);
     lock::lock_blocking(&path)
+}
+
+/// `name`, or the directory name when none is given.
+fn vault_name(name: Option<&str>, root: &Path) -> Result<String> {
+    match name {
+        Some(name) => Ok(name.to_string()),
+        None => dir_name(root),
+    }
 }
 
 fn dir_name(root: &Path) -> Result<String> {
