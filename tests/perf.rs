@@ -1,6 +1,8 @@
 //! Performance targets (spec §4.1, §4.5). Runs only with NOTRIEVE_TEST_MODEL=1 and NOTRIEVE_PERF=1
 //! on Apple Silicon. Vectors are faked: a rebuild served by the cache never runs the model, while
 //! chunking still needs the real tokenizer.
+mod support;
+
 use std::fs;
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -16,6 +18,7 @@ use notrieve::fingerprint::{Fingerprints, fingerprints};
 use notrieve::indexer::{IndexOptions, index_vault};
 use notrieve::search::{DEFAULT_K, SearchQuery, open_reader, search};
 use notrieve::store::{RebuildReason, Store};
+use support::enabled;
 use tempfile::TempDir;
 
 const FILES: usize = 10_000;
@@ -105,10 +108,6 @@ fn note(i: usize) -> String {
         text.push('\n');
     }
     text
-}
-
-fn enabled(var: &str) -> bool {
-    std::env::var(var).as_deref() == Ok("1")
 }
 
 fn index(

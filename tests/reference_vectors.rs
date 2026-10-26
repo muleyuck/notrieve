@@ -1,6 +1,9 @@
 //! Compares the Rust embeddings of the preset with vectors made by `scripts/reference.py`.
 //! The model comparison runs only with NOTRIEVE_TEST_MODEL=1; the `stale_fields` tests always run.
+mod support;
+
 use std::path::Path;
+use support::{cosine, enabled};
 
 use notrieve::config::{ModelSource, ModelSpec, OnnxContract, PRESET_RURI_V3_30M, model_cache_dir};
 use notrieve::embed::download::ensure_model;
@@ -35,16 +38,6 @@ struct Case {
     kind: String,
     text: String,
     vector: Vec<f32>,
-}
-
-fn enabled() -> bool {
-    std::env::var("NOTRIEVE_TEST_MODEL").as_deref() == Ok("1")
-}
-
-fn cosine(a: &[f32], b: &[f32]) -> f32 {
-    let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
-    let norm = |v: &[f32]| v.iter().map(|x| x * x).sum::<f32>().sqrt();
-    dot / (norm(a) * norm(b))
 }
 
 fn preset_contract() -> OnnxContract {
@@ -188,7 +181,7 @@ fn stale_fields_names_a_file_recorded_twice() {
 
 #[test]
 fn preset_vectors_match_the_python_reference() {
-    if !enabled() {
+    if !enabled("NOTRIEVE_TEST_MODEL") {
         eprintln!("skipped: set NOTRIEVE_TEST_MODEL=1");
         return;
     }

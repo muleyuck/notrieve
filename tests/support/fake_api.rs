@@ -234,18 +234,5 @@ fn embeddings(request: &Value, dim: usize, reversed: bool) -> String {
     json!({"object": "list", "data": data, "model": request["model"]}).to_string()
 }
 
-/// The vector the fake API returns for `input`: deterministic and of unit length.
-pub fn fake_vector(input: &str, dim: usize) -> Vec<f32> {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(input.as_bytes());
-    let mut bytes = vec![0u8; dim * 4];
-    hasher.finalize_xof().fill(&mut bytes);
-    let (chunks, _) = bytes.as_chunks::<4>();
-    let mut v: Vec<f32> = chunks
-        .iter()
-        .map(|b| u32::from_le_bytes(*b) as f32 / u32::MAX as f32 - 0.5)
-        .collect();
-    let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
-    v.iter_mut().for_each(|x| *x /= norm);
-    v
-}
+/// The vector the fake API returns for an input: the one `FakeEmbedder` computes.
+pub use notrieve::embed::fake::fake_vector;

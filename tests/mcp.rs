@@ -3,7 +3,6 @@ mod support;
 use std::sync::Arc;
 
 use notrieve::embed::Embedder;
-use notrieve::embed::fake::FakeEmbedder;
 use notrieve::mcp::NotrieveServer;
 use notrieve::search::SearchQuery;
 use notrieve::session::Session;
@@ -11,7 +10,9 @@ use rmcp::model::{CallToolRequestParams, CallToolResult};
 use rmcp::service::RunningService;
 use rmcp::{RoleClient, ServiceExt};
 use serde_json::{Value, json};
-use support::{PanicEmbedder, fps, index_as_another_process, vault, wait_for, write};
+use support::{
+    PanicEmbedder, fake_embedder, fps, index_as_another_process, vault, wait_for, write,
+};
 use tempfile::TempDir;
 
 async fn connect(server: NotrieveServer) -> RunningService<RoleClient, ()> {
@@ -48,8 +49,7 @@ fn synced_session(notes: &[(&str, &str)]) -> (TempDir, Arc<Session>) {
     for (rel, body) in notes {
         write(&vault, rel, body);
     }
-    let session =
-        Arc::new(Session::with_embedder(vault, Arc::new(FakeEmbedder::new(16)), fps("a")).unwrap());
+    let session = Arc::new(Session::with_embedder(vault, fake_embedder(), fps("a")).unwrap());
     wait_for(|| {
         session
             .search(&SearchQuery::new("alpha"))

@@ -9,16 +9,12 @@ use notrieve::search::{IndexState, SearchQuery};
 use notrieve::session::Session;
 use notrieve::{Error, RemoteErrorKind};
 use support::{
-    FlakyRemote, GateEmbedder, PanicEmbedder, fps, index_as_another_process, index_with,
-    indexed_paths, vault, wait_for, write,
+    FlakyRemote, GateEmbedder, PanicEmbedder, fake_embedder, fps, index_as_another_process,
+    index_with, indexed_paths, vault, wait_for, write,
 };
 
 fn q(text: &str) -> SearchQuery {
     SearchQuery::new(text)
-}
-
-fn fake() -> Arc<FakeEmbedder> {
-    Arc::new(FakeEmbedder::new(16))
 }
 
 #[test]
@@ -30,7 +26,7 @@ fn search_after_the_first_sync_finds_notes_in_a_fresh_index() {
         "# 医療費\n医療費控除の領収書をまとめる。\n",
     );
     write(&vault, "旅行.md", "# 京都\n紅葉の季節に嵐山を歩いた。\n");
-    let session = Session::with_embedder(vault, fake(), fps("a")).unwrap();
+    let session = Session::with_embedder(vault, fake_embedder(), fps("a")).unwrap();
     let r = wait_for(|| {
         session
             .search(&q("医療費控除"))
@@ -66,7 +62,7 @@ fn startup_with_the_lock_held_elsewhere_is_a_lock_busy_error_until_it_is_release
     let (_tmp, vault) = vault();
     write(&vault, "a.md", "# A\nalpha\n");
     let held = lock::try_lock(&vault.lock_path()).unwrap().unwrap();
-    let session = Session::with_embedder(vault, fake(), fps("a")).unwrap();
+    let session = Session::with_embedder(vault, fake_embedder(), fps("a")).unwrap();
     wait_for(|| match session.search(&q("alpha")) {
         Err(Error::LockBusy) => Some(()),
         _ => None,
@@ -80,7 +76,7 @@ fn startup_with_the_lock_held_elsewhere_is_a_lock_busy_error_until_it_is_release
 fn a_new_note_is_reported_stale_and_then_indexed_in_the_background() {
     let (_tmp, vault) = vault();
     write(&vault, "a.md", "# A\nalpha\n");
-    let session = Session::with_embedder(vault.clone(), fake(), fps("a")).unwrap();
+    let session = Session::with_embedder(vault.clone(), fake_embedder(), fps("a")).unwrap();
     wait_for(|| {
         session
             .search(&q("alpha"))
@@ -155,7 +151,7 @@ fn a_panicked_background_run_is_attached_and_search_keeps_working() {
 fn another_process_holding_the_lock_is_reported_as_updating_elsewhere() {
     let (_tmp, vault) = vault();
     write(&vault, "a.md", "# A\nalpha\n");
-    let session = Session::with_embedder(vault.clone(), fake(), fps("a")).unwrap();
+    let session = Session::with_embedder(vault.clone(), fake_embedder(), fps("a")).unwrap();
     wait_for(|| {
         session
             .search(&q("alpha"))
@@ -176,7 +172,7 @@ fn an_unreadable_directory_is_reported_as_a_scan_error() {
     let (_tmp, vault) = vault();
     write(&vault, "a.md", "# A\nalpha\n");
     write(&vault, "locked/x.md", "# X\nx\n");
-    let session = Session::with_embedder(vault.clone(), fake(), fps("a")).unwrap();
+    let session = Session::with_embedder(vault.clone(), fake_embedder(), fps("a")).unwrap();
     wait_for(|| {
         session
             .search(&q("alpha"))
@@ -203,7 +199,7 @@ fn an_index_matching_at_startup_asks_for_a_restart_when_another_process_changes_
     // The test holds the write lock throughout, as the other process, so this session's updater
     // never completes a run: `synced` can only come from the startup check.
     let held = lock::try_lock(&vault.lock_path()).unwrap().unwrap();
-    let session = Session::with_embedder(vault.clone(), fake(), fps("a")).unwrap();
+    let session = Session::with_embedder(vault.clone(), fake_embedder(), fps("a")).unwrap();
     let r = session.search(&q("alpha")).unwrap();
     assert_eq!(r.results[0].path, "a.md");
     index_with(&vault, &fps("b"));
@@ -222,7 +218,7 @@ fn an_index_matching_at_startup_asks_for_a_restart_when_another_process_changes_
 fn a_deleted_embedding_cache_is_rebuilt_instead_of_asking_for_a_restart() {
     let (_tmp, vault) = vault();
     write(&vault, "a.md", "# A\nalpha\n");
-    let session = Session::with_embedder(vault.clone(), fake(), fps("a")).unwrap();
+    let session = Session::with_embedder(vault.clone(), fake_embedder(), fps("a")).unwrap();
     wait_for(|| {
         session
             .search(&q("alpha"))
@@ -251,7 +247,7 @@ fn a_deleted_embedding_cache_is_rebuilt_instead_of_asking_for_a_restart() {
 fn a_replaced_embedding_cache_is_noticed_and_rebuilt() {
     let (_tmp, vault) = vault();
     write(&vault, "a.md", "# A\nalpha\n");
-    let session = Session::with_embedder(vault.clone(), fake(), fps("a")).unwrap();
+    let session = Session::with_embedder(vault.clone(), fake_embedder(), fps("a")).unwrap();
     wait_for(|| {
         session
             .search(&q("alpha"))
@@ -279,7 +275,7 @@ fn a_replaced_embedding_cache_is_noticed_and_rebuilt() {
 fn get_note_reads_lines_of_an_indexed_note() {
     let (_tmp, vault) = vault();
     write(&vault, "a.md", "# A\nalpha\nbeta\n");
-    let session = Session::with_embedder(vault, fake(), fps("a")).unwrap();
+    let session = Session::with_embedder(vault, fake_embedder(), fps("a")).unwrap();
     let n = wait_for(|| session.get_note("a.md", Some(2), None).ok());
     assert_eq!(
         (n.start_line, n.end_line, n.text.as_str()),
@@ -292,7 +288,7 @@ fn get_note_refuses_a_vault_file_the_index_leaves_out() {
     let (_tmp, vault) = vault();
     write(&vault, "a.md", "# A\nalpha\n");
     write(&vault, ".env", "SECRET=1\n");
-    let session = Session::with_embedder(vault, fake(), fps("a")).unwrap();
+    let session = Session::with_embedder(vault, fake_embedder(), fps("a")).unwrap();
     wait_for(|| {
         session
             .search(&q("alpha"))
@@ -311,7 +307,7 @@ fn get_note_before_any_index_exists_reports_why_without_creating_one() {
     let (_tmp, vault) = vault();
     write(&vault, "a.md", "# A\nalpha\n");
     let held = lock::try_lock(&vault.lock_path()).unwrap().unwrap();
-    let session = Session::with_embedder(vault.clone(), fake(), fps("a")).unwrap();
+    let session = Session::with_embedder(vault.clone(), fake_embedder(), fps("a")).unwrap();
     // Until the updater's first run has failed to take the lock, the answer is Rebuilding.
     wait_for(|| match session.get_note("a.md", None, None) {
         Err(Error::LockBusy) => Some(()),
@@ -327,7 +323,7 @@ fn get_note_refuses_an_index_built_with_other_settings() {
     write(&vault, "a.md", "# A\nalpha\n");
     index_as_another_process(&vault, &fps("b"));
     let held = lock::try_lock(&vault.lock_path()).unwrap().unwrap();
-    let session = Session::with_embedder(vault, fake(), fps("a")).unwrap();
+    let session = Session::with_embedder(vault, fake_embedder(), fps("a")).unwrap();
     wait_for(|| match session.get_note("a.md", None, None) {
         Err(Error::LockBusy) => Some(()),
         _ => None,
@@ -342,7 +338,7 @@ fn get_note_on_a_garbage_index_reports_why_like_search() {
     std::fs::create_dir_all(vault.db_path().parent().unwrap()).unwrap();
     std::fs::write(vault.db_path(), "not a database at all, just text").unwrap();
     let held = lock::try_lock(&vault.lock_path()).unwrap().unwrap();
-    let session = Session::with_embedder(vault, fake(), fps("a")).unwrap();
+    let session = Session::with_embedder(vault, fake_embedder(), fps("a")).unwrap();
     wait_for(|| match session.get_note("a.md", None, None) {
         Err(Error::LockBusy) => Some(()),
         _ => None,
@@ -356,7 +352,7 @@ fn get_note_on_a_newer_schema_after_the_sync_asks_for_a_restart() {
     write(&vault, "a.md", "# A\nalpha\n");
     index_as_another_process(&vault, &fps("a"));
     let held = lock::try_lock(&vault.lock_path()).unwrap().unwrap();
-    let session = Session::with_embedder(vault.clone(), fake(), fps("a")).unwrap();
+    let session = Session::with_embedder(vault.clone(), fake_embedder(), fps("a")).unwrap();
     session.search(&q("alpha")).unwrap();
     let newer = (notrieve::store::SCHEMA_VERSION + 1).to_string();
     rusqlite::Connection::open(vault.db_path())
@@ -376,7 +372,7 @@ fn get_note_keeps_to_the_vault_root_resolved_at_the_start() {
     let (tmp, mut vault) = vault();
     vault.config.db_path = tmp.path().join("index.db");
     write(&vault, "a.md", "# A\nalpha\n");
-    let session = Session::with_embedder(vault.clone(), fake(), fps("a")).unwrap();
+    let session = Session::with_embedder(vault.clone(), fake_embedder(), fps("a")).unwrap();
     wait_for(|| {
         session
             .search(&q("alpha"))
@@ -460,7 +456,7 @@ fn an_older_schema_with_matching_fingerprints_is_not_searchable_while_the_lock_i
         )
         .unwrap();
     let _held = lock::try_lock(&vault.lock_path()).unwrap().unwrap();
-    let session = Session::with_embedder(vault, fake(), fps("a")).unwrap();
+    let session = Session::with_embedder(vault, fake_embedder(), fps("a")).unwrap();
     wait_for(|| match session.search(&q("alpha")) {
         Err(Error::LockBusy) => Some(()),
         _ => None,
@@ -471,7 +467,7 @@ fn an_older_schema_with_matching_fingerprints_is_not_searchable_while_the_lock_i
 fn a_garbage_embedding_cache_is_rebuilt() {
     let (_tmp, vault) = vault();
     write(&vault, "a.md", "# A\nalpha\n");
-    let session = Session::with_embedder(vault.clone(), fake(), fps("a")).unwrap();
+    let session = Session::with_embedder(vault.clone(), fake_embedder(), fps("a")).unwrap();
     wait_for(|| {
         session
             .search(&q("alpha"))
@@ -526,7 +522,7 @@ fn a_note_written_while_a_run_is_in_progress_is_indexed_without_another_search()
 fn a_stopped_updater_keeps_asking_for_a_restart() {
     let (_tmp, vault) = vault();
     write(&vault, "a.md", "# A\nalpha\n");
-    let session = Session::with_embedder(vault.clone(), fake(), fps("a")).unwrap();
+    let session = Session::with_embedder(vault.clone(), fake_embedder(), fps("a")).unwrap();
     wait_for(|| {
         session
             .search(&q("alpha"))
@@ -549,7 +545,7 @@ fn a_change_after_a_search_found_the_index_matching_asks_for_a_restart() {
     write(&vault, "a.md", "# A\nalpha\n");
     index_as_another_process(&vault, &fps("b"));
     let held = lock::try_lock(&vault.lock_path()).unwrap().unwrap();
-    let session = Session::with_embedder(vault.clone(), fake(), fps("a")).unwrap();
+    let session = Session::with_embedder(vault.clone(), fake_embedder(), fps("a")).unwrap();
     wait_for(|| match session.search(&q("alpha")) {
         Err(Error::LockBusy) => Some(()),
         _ => None,
@@ -580,7 +576,7 @@ fn a_newer_schema_after_the_sync_asks_for_a_restart() {
     write(&vault, "a.md", "# A\nalpha\n");
     index_as_another_process(&vault, &fps("a"));
     let held = lock::try_lock(&vault.lock_path()).unwrap().unwrap();
-    let session = Session::with_embedder(vault.clone(), fake(), fps("a")).unwrap();
+    let session = Session::with_embedder(vault.clone(), fake_embedder(), fps("a")).unwrap();
     session.search(&q("alpha")).unwrap();
     let newer = (notrieve::store::SCHEMA_VERSION + 1).to_string();
     rusqlite::Connection::open(vault.db_path())
@@ -601,7 +597,7 @@ fn a_newer_schema_with_the_cache_missing_asks_for_a_restart() {
     write(&vault, "a.md", "# A\nalpha\n");
     index_as_another_process(&vault, &fps("a"));
     let held = lock::try_lock(&vault.lock_path()).unwrap().unwrap();
-    let session = Session::with_embedder(vault.clone(), fake(), fps("a")).unwrap();
+    let session = Session::with_embedder(vault.clone(), fake_embedder(), fps("a")).unwrap();
     session.search(&q("alpha")).unwrap();
     let newer = (notrieve::store::SCHEMA_VERSION + 1).to_string();
     rusqlite::Connection::open(vault.db_path())

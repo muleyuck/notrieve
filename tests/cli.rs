@@ -7,7 +7,7 @@ use tempfile::TempDir;
 mod support;
 
 use support::fake_api::{FakeApi, Reply};
-use support::remote_config;
+use support::{remote_config, write_config};
 
 struct Env {
     home: TempDir,
@@ -44,12 +44,7 @@ impl Env {
 
     fn vault(&self, name: &str) -> PathBuf {
         let root = self.dir(name);
-        fs::create_dir_all(root.join(".notrieve")).unwrap();
-        fs::write(
-            root.join(".notrieve/config.toml"),
-            "model = \"ruri-v3-30m\"\n",
-        )
-        .unwrap();
+        write_config(&root, "model = \"ruri-v3-30m\"\n");
         root
     }
 }
@@ -104,7 +99,7 @@ const REMOTE_CONFIG: &str = "chunk_max_tokens = 1500\n[model]\nsource = \"openai
 fn adding_a_vault_shows_where_it_sends_notes() {
     let env = Env::new();
     let root = env.vault("team");
-    fs::write(root.join(".notrieve/config.toml"), REMOTE_CONFIG).unwrap();
+    write_config(&root, REMOTE_CONFIG);
     let out = env.run(env.home.path(), &["vault", "add", root.to_str().unwrap()]);
     let text = stdout(&out);
     assert!(
@@ -118,7 +113,7 @@ fn a_config_changed_after_registration_needs_adding_again() {
     let env = Env::new();
     let root = env.vault("team");
     env.run(env.home.path(), &["vault", "add", root.to_str().unwrap()]);
-    fs::write(root.join(".notrieve/config.toml"), REMOTE_CONFIG).unwrap();
+    write_config(&root, REMOTE_CONFIG);
     let refused = env.run(&root, &["model", "pull"]);
     assert_eq!(refused.status.code(), Some(1));
     assert!(
@@ -156,7 +151,7 @@ fn adding_again_under_a_second_name_approves_the_change_and_can_make_it_default(
             .any(|l| l.starts_with("a\t") && l.ends_with("\tdefault")),
         "{before}"
     );
-    fs::write(root.join(".notrieve/config.toml"), REMOTE_CONFIG).unwrap();
+    write_config(&root, REMOTE_CONFIG);
     let again = env.run(
         env.home.path(),
         &["vault", "add", path, "--name", "b", "--default"],
@@ -176,7 +171,7 @@ fn adding_again_under_a_second_name_approves_the_change_and_can_make_it_default(
 fn search_in_an_unregistered_vault_with_a_remote_model_asks_to_register_it() {
     let env = Env::new();
     let root = env.vault("team");
-    fs::write(root.join(".notrieve/config.toml"), REMOTE_CONFIG).unwrap();
+    write_config(&root, REMOTE_CONFIG);
     let out = env.run(&root, &["search", "anything"]);
     assert_eq!(out.status.code(), Some(1));
     assert!(
@@ -364,12 +359,7 @@ fn mcp_outside_any_vault_answers_tools_with_the_vault_error_and_keeps_stdout_to_
 /// Registered, since a vault with a remote model is used from the working directory only then.
 fn remote_vault(env: &Env, name: &str, base: &str) -> PathBuf {
     let root = env.dir(name);
-    fs::create_dir_all(root.join(".notrieve")).unwrap();
-    fs::write(
-        root.join(".notrieve/config.toml"),
-        remote_config(base, "", ""),
-    )
-    .unwrap();
+    write_config(&root, &remote_config(base, "", ""));
     let out = env.run(env.home.path(), &["vault", "add", root.to_str().unwrap()]);
     assert!(out.status.success(), "{}", stderr(&out));
     root
@@ -439,16 +429,14 @@ fn verbose_logging_does_not_print_the_api_key() {
         let api = FakeApi::start(Reply::Embed { dim: 8 });
         let env = Env::new();
         let root = env.dir("notes");
-        fs::create_dir_all(root.join(".notrieve")).unwrap();
-        fs::write(
-            root.join(".notrieve/config.toml"),
-            remote_config(
+        write_config(
+            &root,
+            &remote_config(
                 &api.base,
                 "",
                 "api_key_env = \"NOTRIEVE_TEST_TRACE_KEY\"\nauth_header = \"User-Agent\"",
             ),
-        )
-        .unwrap();
+        );
         env.run(env.home.path(), &["vault", "add", root.to_str().unwrap()]);
         fs::write(root.join("a.md"), "# A\nalpha\n").unwrap();
         let o = env

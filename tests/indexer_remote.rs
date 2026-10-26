@@ -9,9 +9,11 @@ use notrieve::embed::fake::FakeEmbedder;
 use notrieve::fingerprint::Fingerprints;
 use notrieve::indexer::{IndexEvent, IndexOptions, IndexReport, index_vault};
 use notrieve::store::Store;
-use notrieve::{Error, RemoteErrorKind, Result};
+use notrieve::{RemoteErrorKind, Result};
 use support::fake_api::{FakeApi, Reply, inputs};
-use support::{fps, indexed_paths, remote_embedder, remote_fps, remote_vault, vault, write};
+use support::{
+    fps, indexed_paths, remote_embedder, remote_fps, remote_kind, remote_vault, vault, write,
+};
 
 #[derive(Default)]
 struct Run {
@@ -41,13 +43,6 @@ fn index_with_events(
         ..IndexOptions::for_vault(&vault.config)
     };
     index_vault(&vault.root, &mut store, &mut cache, e, fps, &opts, on_event)
-}
-
-fn kind(err: &Error) -> Option<RemoteErrorKind> {
-    match err {
-        Error::Remote { kind, .. } => Some(*kind),
-        _ => None,
-    }
 }
 
 fn skipped(vault: &Vault) -> Vec<String> {
@@ -126,7 +121,7 @@ fn an_auth_error_ends_the_run_and_keeps_the_files_already_written() {
     write(&vault, "b.md", "# b\nbeta\n");
     let e = remote_embedder(&api.base, "");
     let err = index(&vault, &e, &remote_fps(&vault), Run::default()).unwrap_err();
-    assert_eq!(kind(&err), Some(RemoteErrorKind::Auth), "{err}");
+    assert_eq!(remote_kind(&err), Some(RemoteErrorKind::Auth), "{err}");
     assert_eq!(indexed_paths(&vault), ["a.md"]);
     assert!(skipped(&vault).is_empty());
 }
@@ -163,7 +158,7 @@ fn five_input_errors_in_a_row_stop_the_run() {
     }
     let e = remote_embedder(&api.base, "");
     let err = index(&vault, &e, &remote_fps(&vault), Run::default()).unwrap_err();
-    assert_eq!(kind(&err), Some(RemoteErrorKind::Protocol), "{err}");
+    assert_eq!(remote_kind(&err), Some(RemoteErrorKind::Protocol), "{err}");
     assert_eq!(
         skipped(&vault),
         ["f1.md", "f2.md", "f3.md", "f4.md", "f5.md"]
@@ -222,7 +217,7 @@ fn a_file_served_from_the_cache_does_not_restart_the_streak() {
         ..Run::default()
     };
     let err = index(&vault, &e, &fps, rebuild).unwrap_err();
-    assert_eq!(kind(&err), Some(RemoteErrorKind::Protocol), "{err}");
+    assert_eq!(remote_kind(&err), Some(RemoteErrorKind::Protocol), "{err}");
 }
 
 #[test]
@@ -239,7 +234,7 @@ fn an_answer_of_another_dimension_than_the_index_stops_the_run() {
         api.set_default(Reply::Embed { dim: answered });
         let err = index(&vault, &e, &fps, Run::default()).unwrap_err();
         assert_eq!(
-            kind(&err),
+            remote_kind(&err),
             Some(RemoteErrorKind::Protocol),
             "{indexed} then {answered}: {err}"
         );
@@ -274,7 +269,7 @@ fn a_rebuild_or_a_new_index_does_not_mix_dimensions_either() {
         };
         let err = index(&vault, &e, &fps, run).unwrap_err();
         assert_eq!(
-            kind(&err),
+            remote_kind(&err),
             Some(RemoteErrorKind::Protocol),
             "drop_index={drop_index}: {err}"
         );
@@ -291,7 +286,7 @@ fn two_dimensions_in_one_new_index_stop_the_run() {
     write(&vault, "b.md", "# b\nbeta\n");
     let e = remote_embedder(&api.base, "");
     let err = index(&vault, &e, &remote_fps(&vault), Run::default()).unwrap_err();
-    assert_eq!(kind(&err), Some(RemoteErrorKind::Protocol), "{err}");
+    assert_eq!(remote_kind(&err), Some(RemoteErrorKind::Protocol), "{err}");
     assert_eq!(vectors_of_dim(&vault, 8), 0);
 }
 
@@ -493,7 +488,7 @@ fn vectors_of_two_dimensions_inside_one_file_stop_the_run() {
     );
     let e = remote_embedder(&api.base, "batch_size = 1");
     let err = index(&vault, &e, &remote_fps(&vault), Run::default()).unwrap_err();
-    assert_eq!(kind(&err), Some(RemoteErrorKind::Protocol), "{err}");
+    assert_eq!(remote_kind(&err), Some(RemoteErrorKind::Protocol), "{err}");
     assert_eq!(api.requests().len(), 2);
     assert_eq!(
         (vectors_of_dim(&vault, 4), vectors_of_dim(&vault, 8)),

@@ -2,23 +2,18 @@ mod support;
 
 use std::time::{Duration, Instant};
 
+use notrieve::RemoteErrorKind;
 use notrieve::app::{self, Paths};
 use notrieve::embed::{Embedder, RemoteEmbedder};
 use notrieve::fingerprint::remote_fingerprints;
-use notrieve::{Error, RemoteErrorKind};
 use serde_json::json;
 use support::fake_api::{FakeApi, Reply, fake_vector};
-use support::{TEST_KEY, TEST_KEY_ENV, remote_contract, remote_embedder, remote_vault};
+use support::{
+    TEST_KEY, TEST_KEY_ENV, remote_contract, remote_embedder, remote_kind, remote_vault,
+};
 
 fn texts(items: &[&str]) -> Vec<String> {
     items.iter().map(|s| s.to_string()).collect()
-}
-
-fn kind(err: &Error) -> Option<RemoteErrorKind> {
-    match err {
-        Error::Remote { kind, .. } => Some(*kind),
-        _ => None,
-    }
 }
 
 /// No retries: one request per call.
@@ -150,7 +145,7 @@ fn a_missing_or_empty_api_key_is_an_auth_error_before_any_request() {
     for value in [None, Some(String::new())] {
         let e = RemoteEmbedder::new(contract.clone()).with_env(move |_| value.clone());
         let err = e.embed_query("q").unwrap_err();
-        assert_eq!(kind(&err), Some(RemoteErrorKind::Auth), "{err}");
+        assert_eq!(remote_kind(&err), Some(RemoteErrorKind::Auth), "{err}");
         assert!(err.to_string().contains("NOTRIEVE_KEY"), "{err}");
     }
     assert!(api.requests().is_empty());
@@ -179,7 +174,7 @@ fn a_429_is_retried_after_the_retry_after_seconds() {
 fn transient_failures_are_retried_three_times_then_reported() {
     let api = FakeApi::start(Reply::status(503));
     let err = remote_embedder(&api.base, "").embed_query("q").unwrap_err();
-    assert_eq!(kind(&err), Some(RemoteErrorKind::Transient), "{err}");
+    assert_eq!(remote_kind(&err), Some(RemoteErrorKind::Transient), "{err}");
     assert_eq!(api.requests().len(), 4);
 }
 
@@ -190,7 +185,7 @@ fn with_a_deadline_a_transient_failure_is_not_retried() {
     let err = remote_embedder(&api.base, "")
         .embed_query_within("q", Some(deadline))
         .unwrap_err();
-    assert_eq!(kind(&err), Some(RemoteErrorKind::Transient), "{err}");
+    assert_eq!(remote_kind(&err), Some(RemoteErrorKind::Transient), "{err}");
     assert_eq!(api.requests().len(), 1);
 }
 
@@ -207,7 +202,7 @@ fn a_reply_slower_than_the_deadline_fails_at_the_deadline() {
             Some(started + Duration::from_millis(300)),
         )
         .unwrap_err();
-    assert_eq!(kind(&err), Some(RemoteErrorKind::Transient), "{err}");
+    assert_eq!(remote_kind(&err), Some(RemoteErrorKind::Transient), "{err}");
     assert!(
         started.elapsed() < Duration::from_secs(2),
         "{:?}",
@@ -221,7 +216,7 @@ fn a_passed_deadline_sends_nothing() {
     let err = remote_embedder(&api.base, "")
         .embed_query_within("q", Some(Instant::now()))
         .unwrap_err();
-    assert_eq!(kind(&err), Some(RemoteErrorKind::Transient), "{err}");
+    assert_eq!(remote_kind(&err), Some(RemoteErrorKind::Transient), "{err}");
     assert!(api.requests().is_empty());
 }
 
@@ -244,7 +239,7 @@ fn status_codes_map_to_error_kinds() {
     ] {
         let api = FakeApi::start(Reply::status(code));
         let err = once(&api, "").embed_query("q").unwrap_err();
-        assert_eq!(kind(&err), Some(expected), "{code}: {err}");
+        assert_eq!(remote_kind(&err), Some(expected), "{code}: {err}");
     }
 }
 
@@ -269,7 +264,7 @@ fn an_unreachable_server_is_a_transient_error() {
         .port();
     let e = remote_embedder(&format!("http://127.0.0.1:{port}/v1"), "").with_retry_delays(&[]);
     let err = e.embed_query("q").unwrap_err();
-    assert_eq!(kind(&err), Some(RemoteErrorKind::Transient), "{err}");
+    assert_eq!(remote_kind(&err), Some(RemoteErrorKind::Transient), "{err}");
 }
 
 #[test]
@@ -281,7 +276,7 @@ fn a_redirect_is_not_followed() {
         body: String::new(),
     });
     let err = once(&api, "").embed_query("q").unwrap_err();
-    assert_eq!(kind(&err), Some(RemoteErrorKind::Protocol), "{err}");
+    assert_eq!(remote_kind(&err), Some(RemoteErrorKind::Protocol), "{err}");
     assert_eq!(api.requests().len(), 1);
 }
 
@@ -343,7 +338,11 @@ fn invalid_responses_are_protocol_errors() {
         let err = once(&api, "")
             .embed_documents(&texts(&["a", "b"]))
             .unwrap_err();
-        assert_eq!(kind(&err), Some(RemoteErrorKind::Protocol), "{body}: {err}");
+        assert_eq!(
+            remote_kind(&err),
+            Some(RemoteErrorKind::Protocol),
+            "{body}: {err}"
+        );
     }
 }
 
@@ -406,7 +405,7 @@ fn loading_a_remote_model_downloads_nothing() {
 fn a_response_over_64_mib_is_a_protocol_error() {
     let api = FakeApi::start(Reply::Body("x".repeat((64 << 20) + 1)));
     let err = once(&api, "").embed_query("q").unwrap_err();
-    assert_eq!(kind(&err), Some(RemoteErrorKind::Protocol), "{err}");
+    assert_eq!(remote_kind(&err), Some(RemoteErrorKind::Protocol), "{err}");
     assert!(err.to_string().contains("64 MiB"), "{err}");
 }
 
@@ -442,6 +441,6 @@ fn a_status_decides_the_kind_even_when_its_body_is_cut_short() {
             body: "short".into(),
         });
         let err = once(&api, "").embed_query("q").unwrap_err();
-        assert_eq!(kind(&err), Some(expected), "{code}: {err}");
+        assert_eq!(remote_kind(&err), Some(expected), "{code}: {err}");
     }
 }
