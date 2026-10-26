@@ -174,88 +174,99 @@ fn run_loop(
     backoff: Backoff,
 ) {
     lower_priority();
-    loop {
-        let synced = {
-            let mut state = shared.lock();
-            loop {
-                if state.shutdown || state.status.stopped || state.status.halted {
-                    return;
-                }
-                // Remote spec §5.3: during the wait, requests only coalesce; one run follows it.
-                if let Some(at) = state.retry_at {
-                    let now = Instant::now();
-                    if now < at {
-                        state = shared
-                            .wake
-                            .wait_timeout(state, at - now)
-                            .unwrap_or_else(|e| e.into_inner())
-                            .0;
-                        continue;
-                    }
-                    state.retry_at = None;
-                    state.pending = true;
-                }
-                if state.pending {
-                    break;
-                }
-                state = shared.wake.wait(state).unwrap_or_else(|e| e.into_inner());
-            }
-            state.pending = false;
-            state.status.running = true;
-            state.status.synced
-        };
+    while let Some(synced) = wait_for_run(shared) {
         let outcome = catch_unwind(AssertUnwindSafe(|| {
             run_once(shared, vault, embedder, fps, synced)
         }));
-        let mut guard = shared.lock();
-        let State {
-            status, retry_at, ..
-        } = &mut *guard;
-        status.running = false;
-        status.rebuilding = false;
-        status.remaining = None;
-        status.lock_busy = false;
-        match outcome {
-            Ok(Ok(Some(report))) => {
-                status.synced = true;
-                status.skipped_files = report.skipped.len();
-                match report.interrupted {
-                    Some(reason) => {
-                        let delay = backoff.next(status.retry_delay);
-                        status.retry_delay = Some(delay);
-                        *retry_at = Some(Instant::now() + delay);
-                        status.last_error = Some(format!(
-                            "the background indexer paused for {delay:?}: {reason}"
-                        ));
-                    }
-                    None => {
-                        status.retry_delay = None;
-                        status.last_error = None;
-                    }
+        record_outcome(&mut shared.lock(), backoff, outcome);
+    }
+}
+
+/// Waits until a run is due and marks it started. Returns whether the index was synced before
+/// it, or `None` once the updater shuts down, stops or halts.
+fn wait_for_run(shared: &Shared) -> Option<bool> {
+    let mut state = shared.lock();
+    loop {
+        if state.shutdown || state.status.stopped || state.status.halted {
+            return None;
+        }
+        // Remote spec §5.3: during the wait, requests only coalesce; one run follows it.
+        if let Some(at) = state.retry_at {
+            let now = Instant::now();
+            if now < at {
+                state = shared
+                    .wake
+                    .wait_timeout(state, at - now)
+                    .unwrap_or_else(|e| e.into_inner())
+                    .0;
+                continue;
+            }
+            state.retry_at = None;
+            state.pending = true;
+        }
+        if state.pending {
+            break;
+        }
+        state = shared.wake.wait(state).unwrap_or_else(|e| e.into_inner());
+    }
+    state.pending = false;
+    state.status.running = true;
+    Some(state.status.synced)
+}
+
+/// Records how a run ended in the status the session reads.
+fn record_outcome(
+    state: &mut State,
+    backoff: Backoff,
+    outcome: std::thread::Result<Result<Option<IndexReport>>>,
+) {
+    let State {
+        status, retry_at, ..
+    } = state;
+    status.running = false;
+    status.rebuilding = false;
+    status.remaining = None;
+    status.lock_busy = false;
+    match outcome {
+        Ok(Ok(Some(report))) => {
+            status.synced = true;
+            status.skipped_files = report.skipped.len();
+            match report.interrupted {
+                Some(reason) => {
+                    let delay = backoff.next(status.retry_delay);
+                    status.retry_delay = Some(delay);
+                    *retry_at = Some(Instant::now() + delay);
+                    status.last_error = Some(format!(
+                        "the background indexer paused for {delay:?}: {reason}"
+                    ));
+                }
+                None => {
+                    status.retry_delay = None;
+                    status.last_error = None;
                 }
             }
-            Ok(Ok(None)) => status.lock_busy = true,
-            Ok(Err(Error::FingerprintChanged)) => {
-                status.stopped = true;
-                status.last_error = Some(format!(
-                    "the background indexer stopped: {}",
-                    Error::FingerprintChanged
-                ));
-            }
-            // Only auth and protocol errors end a run: transient ones become `interrupted`.
-            Ok(Err(e @ Error::Remote { .. })) => {
-                status.halted = true;
-                status.last_error = Some(format!(
-                    "the background indexer stopped: {e}; fix the [model] settings and restart the MCP server"
-                ));
-            }
-            Ok(Err(e)) => status.last_error = Some(format!("the background indexer failed: {e}")),
-            Err(panic) => {
-                status.last_error = Some(format!(
-                    "the background indexer panicked: {}",
-                    panic_message(panic.as_ref())
-                ))
-            }
+        }
+        Ok(Ok(None)) => status.lock_busy = true,
+        Ok(Err(Error::FingerprintChanged)) => {
+            status.stopped = true;
+            status.last_error = Some(format!(
+                "the background indexer stopped: {}",
+                Error::FingerprintChanged
+            ));
+        }
+        // Only auth and protocol errors end a run: transient ones become `interrupted`.
+        Ok(Err(e @ Error::Remote { .. })) => {
+            status.halted = true;
+            status.last_error = Some(format!(
+                "the background indexer stopped: {e}; fix the [model] settings and restart the MCP server"
+            ));
+        }
+        Ok(Err(e)) => status.last_error = Some(format!("the background indexer failed: {e}")),
+        Err(panic) => {
+            status.last_error = Some(format!(
+                "the background indexer panicked: {}",
+                panic_message(panic.as_ref())
+            ))
         }
     }
 }
