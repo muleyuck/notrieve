@@ -9,11 +9,13 @@ use std::path::Path;
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
-use std::sync::{Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use notrieve::cache::{EmbeddingCache, cache_path};
-use notrieve::config::{ModelContract, RemoteContract, Vault, VaultConfig};
+use notrieve::config::{
+    CONFIG_DIR, CONFIG_FILE, ModelContract, RemoteContract, Vault, VaultConfig,
+};
 use notrieve::embed::fake::FakeEmbedder;
 use notrieve::embed::{Embedder, RemoteEmbedder, lock_unpoisoned};
 use notrieve::fingerprint::{Fingerprints, remote_fingerprints};
@@ -32,14 +34,48 @@ pub fn fps(tag: &str) -> Fingerprints {
     }
 }
 
-/// An empty vault at `<tmp>/notes` with the default config.
-pub fn vault() -> (TempDir, Vault) {
+/// Writes `config` as `<root>/.notrieve/config.toml`, creating the directories.
+pub fn write_config(root: &Path, config: &str) {
+    let dir = root.join(CONFIG_DIR);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join(CONFIG_FILE), config).unwrap();
+}
+
+/// An empty vault at `<tmp>/notes` with `config` as its config.
+pub fn vault_with(config: &str) -> (TempDir, Vault) {
     let tmp = TempDir::new().unwrap();
     let root = tmp.path().join("notes");
-    fs::create_dir_all(root.join(".notrieve")).unwrap();
-    fs::write(root.join(".notrieve/config.toml"), "").unwrap();
+    write_config(&root, config);
     let vault = Vault::load(&root, None).unwrap();
     (tmp, vault)
+}
+
+/// An empty vault at `<tmp>/notes` with the default config.
+pub fn vault() -> (TempDir, Vault) {
+    vault_with("")
+}
+
+/// Whether the opt-in variable `var` (listed in AGENTS.md) is set to 1.
+pub fn enabled(var: &str) -> bool {
+    std::env::var(var).as_deref() == Ok("1")
+}
+
+pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
+    let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
+    let norm = |v: &[f32]| v.iter().map(|x| x * x).sum::<f32>().sqrt();
+    dot / (norm(a) * norm(b))
+}
+
+/// The kind of a remote embedding error, `None` for any other error.
+pub fn remote_kind(err: &Error) -> Option<RemoteErrorKind> {
+    match err {
+        Error::Remote { kind, .. } => Some(*kind),
+        _ => None,
+    }
+}
+
+pub fn fake_embedder() -> Arc<FakeEmbedder> {
+    Arc::new(FakeEmbedder::new(16))
 }
 
 pub fn write(vault: &Vault, rel: &str, text: &str) {
@@ -84,13 +120,7 @@ pub fn index_with(vault: &Vault, fps: &Fingerprints) {
     let db = vault.db_path();
     let mut store = Store::open(&db).unwrap();
     let mut cache = EmbeddingCache::open(&cache_path(&db)).unwrap();
-    let opts = IndexOptions {
-        exclude: &[],
-        chunk_max_tokens: 450,
-        budget: None,
-        deadline: None,
-        rebuild: false,
-    };
+    let opts = IndexOptions::default();
     index_vault(
         &vault.root,
         &mut store,
@@ -294,16 +324,7 @@ pub fn remote_config(base: &str, top: &str, model: &str) -> String {
 
 /// A vault at `<tmp>/notes` whose model is the endpoint at `base`.
 pub fn remote_vault(base: &str, top: &str, model: &str) -> (TempDir, Vault) {
-    let tmp = TempDir::new().unwrap();
-    let root = tmp.path().join("notes");
-    fs::create_dir_all(root.join(".notrieve")).unwrap();
-    fs::write(
-        root.join(".notrieve/config.toml"),
-        remote_config(base, top, model),
-    )
-    .unwrap();
-    let vault = Vault::load(&root, None).unwrap();
-    (tmp, vault)
+    vault_with(&remote_config(base, top, model))
 }
 
 pub fn remote_contract(base: &str, model: &str) -> RemoteContract {

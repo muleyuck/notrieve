@@ -6,7 +6,7 @@ use notrieve::embed::Embedder;
 use notrieve::embed::fake::FakeEmbedder;
 use notrieve::fingerprint::Fingerprints;
 use notrieve::indexer::{IndexOptions, index_vault};
-use notrieve::search::{Hit, MAX_K, SearchQuery, open_reader, search};
+use notrieve::search::{Hit, MAX_K, SearchQuery, search};
 use notrieve::store::Store;
 use notrieve::{Error, Result};
 use tempfile::TempDir;
@@ -45,13 +45,7 @@ impl Fixture {
     fn index(&self) {
         let mut store = Store::open(&self.db()).unwrap();
         let mut cache = EmbeddingCache::open(&cache_path(&self.db())).unwrap();
-        let opts = IndexOptions {
-            exclude: &[],
-            chunk_max_tokens: 450,
-            budget: None,
-            deadline: None,
-            rebuild: false,
-        };
+        let opts = IndexOptions::default();
         let fps = Fingerprints {
             model: "model-a".into(),
             index: FP.into(),
@@ -70,7 +64,7 @@ impl Fixture {
     }
 
     fn search(&self, query: &SearchQuery) -> Result<Vec<Hit>> {
-        let reader = open_reader(&self.db()).unwrap();
+        let reader = Store::open_reader(&self.db()).unwrap();
         search(&reader, &*self.embedder, FP, query, None).map(|found| found.hits)
     }
 
@@ -466,7 +460,10 @@ fn chunk_whose_vector_is_missing_from_the_cache_is_left_out_of_vector_results() 
 #[test]
 fn a_missing_cache_is_index_not_ready() {
     let f = Fixture::new();
-    assert!(matches!(open_reader(&f.db()), Err(Error::IndexNotReady)));
+    assert!(matches!(
+        Store::open_reader(&f.db()),
+        Err(Error::IndexNotReady)
+    ));
 }
 
 #[test]
@@ -474,7 +471,7 @@ fn another_index_fingerprint_is_index_not_ready() {
     let f = Fixture::new();
     f.write("a.md", "alpha beta\n");
     f.index();
-    let reader = open_reader(&f.db()).unwrap();
+    let reader = Store::open_reader(&f.db()).unwrap();
     assert!(matches!(
         search(
             &reader,
@@ -548,7 +545,7 @@ fn a_commit_from_another_connection_during_the_search_is_not_seen() {
     f.write("a.md", "議事録の書き方を学ぶ。\n");
     f.write("b.md", "週報の書き方を学ぶ。\n");
     f.index();
-    let reader = open_reader(&f.db()).unwrap();
+    let reader = Store::open_reader(&f.db()).unwrap();
     let deleting = DeletingEmbedder {
         inner: &*f.embedder,
         db: f.db(),

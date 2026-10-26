@@ -1,4 +1,6 @@
 //! Search quality (spec §7). Runs only with NOTRIEVE_TEST_MODEL=1.
+mod support;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -8,6 +10,7 @@ use notrieve::embed::Embedder;
 use notrieve::fingerprint::Fingerprints;
 use notrieve::search::SearchQuery;
 use serde::Deserialize;
+use support::{enabled, write_config};
 use tempfile::TempDir;
 
 /// The default model is ruri-v3-30m fp32. Measurement on macOS arm64 (2026-10-24, 35 queries over
@@ -25,10 +28,6 @@ struct EvalQuery {
     text: String,
     path: String,
     heading: String,
-}
-
-fn enabled(var: &str) -> bool {
-    std::env::var(var).as_deref() == Ok("1")
 }
 
 fn eval_dir() -> PathBuf {
@@ -52,8 +51,7 @@ fn copy_dir(from: &Path, to: &Path) {
 fn eval_vault(tmp: &Path, config: &str) -> Vault {
     let root = tmp.join("vault");
     copy_dir(&eval_dir().join("vault"), &root);
-    fs::create_dir_all(root.join(".notrieve")).unwrap();
-    fs::write(root.join(".notrieve/config.toml"), config).unwrap();
+    write_config(&root, config);
     Vault::load(&root, None).unwrap()
 }
 

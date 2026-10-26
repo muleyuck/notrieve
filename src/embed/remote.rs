@@ -182,19 +182,7 @@ impl RemoteEmbedder {
         key: Option<&str>,
         deadline: Option<Instant>,
     ) -> std::result::Result<Vec<u8>, Failure> {
-        let timeout = match deadline {
-            Some(deadline) => {
-                let left = deadline.saturating_duration_since(Instant::now());
-                if left.is_zero() {
-                    return Err(Failure::new(
-                        RemoteErrorKind::Transient,
-                        "no time was left for the request".into(),
-                    ));
-                }
-                left
-            }
-            None => REQUEST_TIMEOUT,
-        };
+        let timeout = timeout_for(deadline)?;
         let mut request = self
             .agent
             .post(&self.url)
@@ -204,16 +192,7 @@ impl RemoteEmbedder {
                 concat!("notrieve/", env!("CARGO_PKG_VERSION")),
             );
         if let Some(key) = key {
-            let value = if self
-                .contract
-                .auth_header
-                .eq_ignore_ascii_case("authorization")
-            {
-                format!("Bearer {key}")
-            } else {
-                key.to_string()
-            };
-            request = request.header(self.contract.auth_header.as_str(), value);
+            request = request.header(self.contract.auth_header.as_str(), self.auth_value(key));
         }
         let response = request
             .config()
@@ -233,12 +212,8 @@ impl RemoteEmbedder {
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.trim().parse::<u64>().ok())
             .map(Duration::from_secs);
-        let kind = match status {
-            200..=299 => return self.read_body(response.into_body()),
-            408 | 429 | 500..=599 => RemoteErrorKind::Transient,
-            401 | 403 => RemoteErrorKind::Auth,
-            300..=399 | 404 | 405 => RemoteErrorKind::Protocol,
-            _ => RemoteErrorKind::Input,
+        let Some(kind) = status_kind(status) else {
+            return self.read_body(response.into_body());
         };
         let mut message = format!("HTTP {status} from {}", self.url);
         match kind {
@@ -262,6 +237,19 @@ impl RemoteEmbedder {
             message,
             retry_after,
         })
+    }
+
+    /// `Authorization` carries a bearer token; any other header carries the key as it is.
+    fn auth_value(&self, key: &str) -> String {
+        if self
+            .contract
+            .auth_header
+            .eq_ignore_ascii_case("authorization")
+        {
+            format!("Bearer {key}")
+        } else {
+            key.to_string()
+        }
     }
 
     /// The body after decompression, at most `MAX_RESPONSE_BYTES`: ureq's own `limit` counts the
@@ -404,6 +392,32 @@ impl Embedder for RemoteEmbedder {
     fn is_remote(&self) -> bool {
         true
     }
+}
+
+/// How long the request may take: what is left before `deadline`, or `REQUEST_TIMEOUT`.
+fn timeout_for(deadline: Option<Instant>) -> std::result::Result<Duration, Failure> {
+    let Some(deadline) = deadline else {
+        return Ok(REQUEST_TIMEOUT);
+    };
+    let left = deadline.saturating_duration_since(Instant::now());
+    if left.is_zero() {
+        return Err(Failure::new(
+            RemoteErrorKind::Transient,
+            "no time was left for the request".into(),
+        ));
+    }
+    Ok(left)
+}
+
+/// The kind of failure an HTTP status means, `None` for success.
+fn status_kind(status: u16) -> Option<RemoteErrorKind> {
+    Some(match status {
+        200..=299 => return None,
+        408 | 429 | 500..=599 => RemoteErrorKind::Transient,
+        401 | 403 => RemoteErrorKind::Auth,
+        300..=399 | 404 | 405 => RemoteErrorKind::Protocol,
+        _ => RemoteErrorKind::Input,
+    })
 }
 
 #[cfg(test)]

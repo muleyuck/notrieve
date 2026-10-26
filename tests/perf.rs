@@ -1,6 +1,8 @@
 //! Performance targets (spec §4.1, §4.5). Runs only with NOTRIEVE_TEST_MODEL=1 and NOTRIEVE_PERF=1
 //! on Apple Silicon. Vectors are faked: a rebuild served by the cache never runs the model, while
 //! chunking still needs the real tokenizer.
+mod support;
+
 use std::fs;
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -14,8 +16,9 @@ use notrieve::embed::onnx::resolve_threads;
 use notrieve::embed::{Embedder, OnnxEmbedder};
 use notrieve::fingerprint::{Fingerprints, fingerprints};
 use notrieve::indexer::{IndexOptions, index_vault};
-use notrieve::search::{DEFAULT_K, SearchQuery, open_reader, search};
+use notrieve::search::{DEFAULT_K, SearchQuery, search};
 use notrieve::store::{RebuildReason, Store};
+use support::enabled;
 use tempfile::TempDir;
 
 const FILES: usize = 10_000;
@@ -107,10 +110,6 @@ fn note(i: usize) -> String {
     text
 }
 
-fn enabled(var: &str) -> bool {
-    std::env::var(var).as_deref() == Ok("1")
-}
-
 fn index(
     root: &Path,
     store: &mut Store,
@@ -119,13 +118,7 @@ fn index(
     fps: &Fingerprints,
 ) -> notrieve::indexer::IndexReport {
     let mut cache = EmbeddingCache::open(&cache_path(db)).unwrap();
-    let opts = IndexOptions {
-        exclude: &[],
-        chunk_max_tokens: 450,
-        budget: None,
-        deadline: None,
-        rebuild: false,
-    };
+    let opts = IndexOptions::default();
     index_vault(root, store, &mut cache, embedder, fps, &opts, &mut |_| {}).unwrap()
 }
 
@@ -191,7 +184,7 @@ fn ten_thousand_files_rebuild_from_the_cache_in_30_seconds_and_search_within_the
     assert!(took < REBUILD_LIMIT, "rebuild took {took:?}");
     drop(store);
 
-    let reader = open_reader(&db).unwrap();
+    let reader = Store::open_reader(&db).unwrap();
     for text in [
         "会議の議事録",
         "紅葉を見に行く",

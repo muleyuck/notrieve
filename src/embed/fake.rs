@@ -29,20 +29,26 @@ impl FakeEmbedder {
     }
 
     fn vector(&self, text: &str) -> Vec<f32> {
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(text.as_bytes());
-        let mut bytes = vec![0u8; self.dim * 4];
-        hasher.finalize_xof().fill(&mut bytes);
-        let mut v: Vec<f32> = bytes
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as f32 / u32::MAX as f32 - 0.5)
-            .collect();
-        let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
-        v.iter_mut().for_each(|x| *x /= norm);
-        v
+        fake_vector(text, self.dim)
     }
+}
+
+/// A deterministic unit vector of `dim` dimensions derived from `text`. The tests' fake
+/// embeddings API returns the same vectors.
+pub fn fake_vector(text: &str, dim: usize) -> Vec<f32> {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(text.as_bytes());
+    let mut bytes = vec![0u8; dim * 4];
+    hasher.finalize_xof().fill(&mut bytes);
+    let mut v: Vec<f32> = bytes
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|b| u32::from_le_bytes(*b) as f32 / u32::MAX as f32 - 0.5)
+        .collect();
+    let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+    v.iter_mut().for_each(|x| *x /= norm);
+    v
 }
 
 impl Embedder for FakeEmbedder {

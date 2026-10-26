@@ -1,5 +1,6 @@
 //! A long-running session over one vault: the model stays loaded and a background thread keeps the
 //! index current (spec §4.6, §5.4). The MCP server calls only this API.
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -7,13 +8,12 @@ use crate::app::{self, Event, Paths};
 use crate::config::Vault;
 use crate::embed::Embedder;
 use crate::fingerprint::Fingerprints;
-use crate::indexer::scan::{plan_changes, scan_vault};
-use crate::indexer::updater::{Updater, changed_elsewhere};
+use crate::indexer::scan::{count_stale, scan_vault};
+use crate::indexer::updater::{Updater, UpdaterStatus, changed_elsewhere};
 use crate::note::{NoteText, read_note};
 use crate::search::{self, IndexState, SearchQuery, SearchResponse};
 use crate::store::Store;
 use crate::{Error, Result};
-use rusqlite::OptionalExtension;
 
 /// MCP has no `search_budget_ms`; a remote query gets this long (remote spec §5.3; a guess).
 pub const MCP_QUERY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -71,30 +71,15 @@ impl Session {
     pub fn search(&self, query: &SearchQuery) -> Result<SearchResponse> {
         query.validate()?;
         let seen = self.updater.observe()?;
-        // A stopped updater indexes nothing more, even if the settings later change back.
-        if seen.status.stopped {
-            return Err(Error::FingerprintChanged);
-        }
-        // A rebuild rewrites the meta first, so its partial index would pass the fingerprint check.
-        if seen.status.running && seen.status.rebuilding {
-            return Err(Error::Rebuilding {
-                remaining: seen.status.remaining,
-            });
-        }
-        let reader = match search::open_reader(&self.vault.db_path()) {
-            Err(Error::SchemaTooNew { .. }) if seen.status.synced => {
-                return Err(Error::FingerprintChanged);
-            }
-            Err(Error::IndexNotReady) => return Err(self.not_ready()?),
-            // A cache replaced by an unreadable file fails the ATTACH; the updater discards it.
-            Err(Error::Sqlite(_) | Error::DbCorrupt(_)) => return Err(self.not_ready()?),
-            other => other?,
-        };
+        refuse_while_unusable(&seen.status)?;
+        let reader = self.open_index(seen.status.synced, Store::open_reader)?;
         // `index_vault` rebuilds when the schema or the cache is not the one the index was built
         // against (spec §4.1). The search fingerprint does not cover the schema, and a replaced
         // cache leaves no stale file, so the search path has to notice both and ask for that
         // rebuild (`not_ready` requests a run). A cache that cannot be queried is replaced too.
-        if reader.rebuild_reason(&self.fps)?.is_some() || !cache_matches(&reader).unwrap_or(false) {
+        if reader.rebuild_reason(&self.fps)?.is_some()
+            || !reader.attached_cache_matches().unwrap_or(false)
+        {
             return Err(self.not_ready()?);
         }
         self.updater.mark_synced();
@@ -104,19 +89,13 @@ impl Session {
         for err in &scan.errors {
             tracing::warn!("{err}");
         }
-        let stale_files =
-            plan_changes(&scan, &reader.file_states()?, &reader.skipped_states()?).stale_files();
-        let index_state = if !scan.complete {
-            IndexState::ScanError
-        } else if seen.status.running {
-            IndexState::Updating
-        } else if seen.locked_elsewhere {
-            IndexState::UpdatingElsewhere
-        } else if stale_files == 0 {
-            IndexState::Fresh
-        } else {
-            IndexState::IdleStale
-        };
+        let stale_files = count_stale(&scan, &reader)?;
+        let index_state = IndexState::classify(
+            scan.complete,
+            seen.status.running,
+            || Ok(seen.locked_elsewhere),
+            stale_files,
+        )?;
         // Not gated on `seen`: the run may have ended during the scan, and requests coalesce.
         if stale_files > 0 {
             self.updater.request();
@@ -145,14 +124,12 @@ impl Session {
                 remaining: after.remaining,
             });
         }
-        Ok(SearchResponse {
-            vector_search: found.vector_search(),
-            vector_error: found.vector_error,
-            results: found.hits,
+        Ok(SearchResponse::new(
+            found,
             stale_files,
             index_state,
-            indexer_error: seen.status.last_error,
-        })
+            seen.status.last_error,
+        ))
     }
 
     pub fn get_note(
@@ -164,31 +141,17 @@ impl Session {
         // Only indexed notes: files the index leaves out (`.env`, `.git/*`, excluded or ignored
         // ones) stay unreadable. A rebuild refills the index file by file.
         let status = self.updater.status();
-        if status.stopped {
-            return Err(Error::FingerprintChanged);
-        }
-        if status.running && status.rebuilding {
-            return Err(Error::Rebuilding {
-                remaining: status.remaining,
-            });
-        }
-        let db = self.vault.db_path();
+        refuse_while_unusable(&status)?;
         // `Store::open` would create a missing index.
-        if !db.is_file() {
+        if !self.vault.db_path().is_file() {
             return Err(self.not_ready()?);
         }
         // The same index `search` accepts: its rows were listed under the current settings.
-        let store = match Store::open(&db) {
-            Err(Error::SchemaTooNew { .. }) if status.synced => {
-                return Err(Error::FingerprintChanged);
-            }
-            Err(Error::Sqlite(_) | Error::DbCorrupt(_)) => return Err(self.not_ready()?),
-            other => other?,
-        };
+        let store = self.open_index(status.synced, Store::open)?;
         // One read snapshot: a rebuild committed between the two checks would otherwise let rows
         // the fingerprint check never saw authorize the path.
         let indexed = {
-            let _snapshot = store.conn().unchecked_transaction()?;
+            let _snapshot = store.read_snapshot()?;
             match store.rebuild_reason(&self.fps)? {
                 Some(_) => None,
                 None => Some(store.has_file(path)?),
@@ -200,6 +163,19 @@ impl Session {
             Some(true) => {}
         }
         read_note(&self.root, path, start_line, end_line)
+    }
+
+    /// Opens the index with `open`, mapping the failures `search` and `get_note` share. After the
+    /// sync, a newer schema means another process rebuilt the index with a newer notrieve. A cache
+    /// replaced by an unreadable file fails the ATTACH of `Store::open_reader`; the updater discards it.
+    fn open_index<T>(&self, synced: bool, open: impl FnOnce(&Path) -> Result<T>) -> Result<T> {
+        match open(&self.vault.db_path()) {
+            Err(Error::SchemaTooNew { .. }) if synced => Err(Error::FingerprintChanged),
+            Err(Error::IndexNotReady | Error::Sqlite(_) | Error::DbCorrupt(_)) => {
+                Err(self.not_ready()?)
+            }
+            other => other,
+        }
     }
 
     /// Why the index cannot be searched (spec §4.6): settings changed by another process after the
@@ -238,15 +214,16 @@ impl Session {
     }
 }
 
-/// Whether the attached cache (`open_reader`) is the one the index was built against.
-fn cache_matches(reader: &Store) -> Result<bool> {
-    let attached: Option<String> = reader
-        .conn()
-        .query_row(
-            "SELECT value FROM cache.meta WHERE key = 'cache_id'",
-            [],
-            |r| r.get(0),
-        )
-        .optional()?;
-    Ok(attached.is_some() && attached == reader.cache_id()?)
+/// A stopped updater indexes nothing more, even if the settings later change back. A rebuild
+/// rewrites the meta first, so its partial index would pass the fingerprint check.
+fn refuse_while_unusable(status: &UpdaterStatus) -> Result<()> {
+    if status.stopped {
+        return Err(Error::FingerprintChanged);
+    }
+    if status.running && status.rebuilding {
+        return Err(Error::Rebuilding {
+            remaining: status.remaining,
+        });
+    }
+    Ok(())
 }

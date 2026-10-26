@@ -7,15 +7,7 @@ use notrieve::embed::{Embedder, OnnxEmbedder};
 
 mod support;
 
-fn enabled() -> bool {
-    std::env::var("NOTRIEVE_TEST_MODEL").as_deref() == Ok("1")
-}
-
-fn cosine(a: &[f32], b: &[f32]) -> f32 {
-    let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
-    let norm = |v: &[f32]| v.iter().map(|x| x * x).sum::<f32>().sqrt();
-    dot / (norm(a) * norm(b))
-}
+use support::{cosine, enabled};
 
 fn preset_embedder() -> OnnxEmbedder {
     let contract = ModelSpec::Preset(PRESET_RURI_V3_30M.into())
@@ -36,7 +28,7 @@ fn sample_texts() -> Vec<String> {
 
 #[test]
 fn preset_model_produces_normalised_256_dimension_vectors() {
-    if !enabled() {
+    if !enabled("NOTRIEVE_TEST_MODEL") {
         eprintln!("skipped: set NOTRIEVE_TEST_MODEL=1");
         return;
     }
@@ -54,7 +46,7 @@ fn preset_model_produces_normalised_256_dimension_vectors() {
 
 #[test]
 fn preset_model_vectors_do_not_depend_on_the_batch_or_the_run() {
-    if !enabled() {
+    if !enabled("NOTRIEVE_TEST_MODEL") {
         eprintln!("skipped: set NOTRIEVE_TEST_MODEL=1");
         return;
     }
@@ -72,7 +64,7 @@ fn preset_model_vectors_do_not_depend_on_the_batch_or_the_run() {
 
 #[test]
 fn preset_model_applies_the_query_prefix() {
-    if !enabled() {
+    if !enabled("NOTRIEVE_TEST_MODEL") {
         eprintln!("skipped: set NOTRIEVE_TEST_MODEL=1");
         return;
     }
@@ -85,7 +77,7 @@ fn preset_model_applies_the_query_prefix() {
 
 #[test]
 fn preset_model_token_ends_are_increasing_char_boundaries() {
-    if !enabled() {
+    if !enabled("NOTRIEVE_TEST_MODEL") {
         eprintln!("skipped: set NOTRIEVE_TEST_MODEL=1");
         return;
     }
@@ -121,7 +113,7 @@ fn mean_contract_and_dir() -> (notrieve::config::OnnxContract, std::path::PathBu
 
 #[test]
 fn mean_pooling_matches_the_models_own_sentence_embedding() {
-    if !enabled() {
+    if !enabled("NOTRIEVE_TEST_MODEL") {
         eprintln!("skipped: set NOTRIEVE_TEST_MODEL=1");
         return;
     }
@@ -158,7 +150,7 @@ fn mean_pooling_matches_the_models_own_sentence_embedding() {
 
 #[test]
 fn cls_pooling_gives_normalised_vectors_unlike_mean() {
-    if !enabled() {
+    if !enabled("NOTRIEVE_TEST_MODEL") {
         eprintln!("skipped: set NOTRIEVE_TEST_MODEL=1");
         return;
     }
@@ -179,7 +171,7 @@ fn cls_pooling_gives_normalised_vectors_unlike_mean() {
 
 #[test]
 fn index_command_indexes_a_small_vault_once() {
-    if !enabled() {
+    if !enabled("NOTRIEVE_TEST_MODEL") {
         eprintln!("skipped: set NOTRIEVE_TEST_MODEL=1");
         return;
     }
@@ -220,7 +212,7 @@ fn index_command_indexes_a_small_vault_once() {
 
 #[test]
 fn cli_init_then_index_prints_counts_and_exits_zero() {
-    if !enabled() {
+    if !enabled("NOTRIEVE_TEST_MODEL") {
         eprintln!("skipped: set NOTRIEVE_TEST_MODEL=1");
         return;
     }
@@ -260,7 +252,7 @@ fn cli_init_then_index_prints_counts_and_exits_zero() {
 
 #[test]
 fn cli_search_json_finds_the_note_and_reports_a_fresh_index() {
-    if !enabled() {
+    if !enabled("NOTRIEVE_TEST_MODEL") {
         eprintln!("skipped: set NOTRIEVE_TEST_MODEL=1");
         return;
     }
@@ -293,7 +285,7 @@ fn cli_search_json_finds_the_note_and_reports_a_fresh_index() {
 
 #[test]
 fn mcp_search_over_stdio_finds_the_note_and_keeps_stdout_to_json_rpc() {
-    if !enabled() {
+    if !enabled("NOTRIEVE_TEST_MODEL") {
         eprintln!("skipped: set NOTRIEVE_TEST_MODEL=1");
         return;
     }

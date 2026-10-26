@@ -6,7 +6,7 @@ use ignore::WalkBuilder;
 use ignore::overrides::OverrideBuilder;
 
 use crate::config::CONFIG_DIR;
-use crate::store::{FileState, SkippedState};
+use crate::store::{FileState, SkippedState, Store};
 use crate::{Error, Result};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,6 +37,11 @@ impl ChangePlan {
     pub fn stale_files(&self) -> usize {
         self.candidates.len() + self.deleted.len()
     }
+}
+
+/// Changes `scan` found against the index, without hashing anything (spec §4.2).
+pub fn count_stale(scan: &Scan, store: &Store) -> Result<usize> {
+    Ok(plan_changes(scan, &store.file_states()?, &store.skipped_states()?).stale_files())
 }
 
 pub fn scan_vault(root: &Path, exclude: &[String]) -> Result<Scan> {

@@ -14,7 +14,7 @@ use notrieve::config::{
 use notrieve::embed::download::ensure_model;
 use notrieve::embed::{Embedder, OnnxEmbedder, RemoteEmbedder};
 use notrieve::search::{SearchQuery, VectorSearch};
-use support::{remote_fps, write};
+use support::{cosine, remote_fps, write, write_config};
 
 fn var(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.is_empty())
@@ -33,12 +33,12 @@ fn a_real_api_indexes_and_searches_a_vault() {
         .unwrap_or_default();
     let tmp = tempfile::TempDir::new().unwrap();
     let root = tmp.path().join("notes");
-    std::fs::create_dir_all(root.join(".notrieve")).unwrap();
-    std::fs::write(
-        root.join(".notrieve/config.toml"),
-        format!("chunk_max_tokens = 1500\n[model]\nsource = \"{source}\"\nremote_model = \"{model}\"\n{key}"),
-    )
-    .unwrap();
+    write_config(
+        &root,
+        &format!(
+            "chunk_max_tokens = 1500\n[model]\nsource = \"{source}\"\nremote_model = \"{model}\"\n{key}"
+        ),
+    );
     let vault = notrieve::config::Vault::load(&root, None).unwrap();
     write(
         &vault,
@@ -72,12 +72,6 @@ fn a_real_api_indexes_and_searches_a_vault() {
     .unwrap();
     assert_eq!(r.vector_search, VectorSearch::Ok, "{:?}", r.vector_error);
     assert_eq!(r.results[0].path, "旅行.md");
-}
-
-fn cosine(a: &[f32], b: &[f32]) -> f32 {
-    let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
-    let norm = |v: &[f32]| v.iter().map(|x| x * x).sum::<f32>().sqrt();
-    dot / (norm(a) * norm(b))
 }
 
 #[test]

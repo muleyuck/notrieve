@@ -4,25 +4,20 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use notrieve::RemoteErrorKind;
-use notrieve::embed::fake::FakeEmbedder;
 use notrieve::indexer::updater::{Backoff, Updater};
 use notrieve::lock;
 use notrieve::store::Store;
 use support::{
-    FlakyRemote, GateEmbedder, PanicEmbedder, fps, index_as_another_process, indexed_paths, vault,
-    wait_for, write,
+    FlakyRemote, GateEmbedder, PanicEmbedder, fake_embedder, fps, index_as_another_process,
+    indexed_paths, vault, wait_for, write,
 };
-
-fn fake() -> Arc<FakeEmbedder> {
-    Arc::new(FakeEmbedder::new(16))
-}
 
 #[test]
 fn requested_run_indexes_the_vault_and_marks_the_index_synced() {
     let (_tmp, vault) = vault();
     write(&vault, "a.md", "# A\nalpha\n");
     write(&vault, "b.md", "# B\nbeta\n");
-    let updater = Updater::start(vault.clone(), fake(), fps("a"), false).unwrap();
+    let updater = Updater::start(vault.clone(), fake_embedder(), fps("a"), false).unwrap();
     assert!(!updater.status().synced, "nothing runs before a request");
     updater.request();
     let status = wait_for(|| Some(updater.status()).filter(|s| s.synced));
@@ -35,7 +30,7 @@ fn lock_held_elsewhere_skips_the_run_until_the_lock_is_free() {
     let (_tmp, vault) = vault();
     write(&vault, "a.md", "# A\nalpha\n");
     let held = lock::try_lock(&vault.lock_path()).unwrap().unwrap();
-    let updater = Updater::start(vault.clone(), fake(), fps("a"), false).unwrap();
+    let updater = Updater::start(vault.clone(), fake_embedder(), fps("a"), false).unwrap();
     updater.request();
     let status = wait_for(|| Some(updater.status()).filter(|s| s.lock_busy && !s.running));
     assert!(!status.synced);
@@ -55,7 +50,7 @@ fn mismatch_before_the_sync_is_rebuilt_with_this_process_settings() {
     let (_tmp, vault) = vault();
     write(&vault, "a.md", "# A\nalpha\n");
     index_as_another_process(&vault, &fps("b"));
-    let updater = Updater::start(vault.clone(), fake(), fps("a"), false).unwrap();
+    let updater = Updater::start(vault.clone(), fake_embedder(), fps("a"), false).unwrap();
     updater.request();
     let status = wait_for(|| Some(updater.status()).filter(|s| s.synced));
     assert_eq!((status.stopped, status.rebuild_generation), (false, 1));
@@ -67,7 +62,7 @@ fn mismatch_before_the_sync_is_rebuilt_with_this_process_settings() {
 fn settings_changed_after_a_run_stop_the_updater_without_writing() {
     let (_tmp, vault) = vault();
     write(&vault, "a.md", "# A\nalpha\n");
-    let updater = Updater::start(vault.clone(), fake(), fps("a"), false).unwrap();
+    let updater = Updater::start(vault.clone(), fake_embedder(), fps("a"), false).unwrap();
     updater.request();
     wait_for(|| Some(updater.status()).filter(|s| s.synced));
     index_as_another_process(&vault, &fps("b"));
@@ -86,7 +81,7 @@ fn index_matching_at_startup_counts_as_synced_before_any_run() {
     let (_tmp, vault) = vault();
     write(&vault, "a.md", "# A\nalpha\n");
     index_as_another_process(&vault, &fps("a"));
-    let updater = Updater::start(vault.clone(), fake(), fps("a"), true).unwrap();
+    let updater = Updater::start(vault.clone(), fake_embedder(), fps("a"), true).unwrap();
     assert!(updater.status().synced);
     index_as_another_process(&vault, &fps("b"));
     updater.request();
@@ -100,7 +95,7 @@ fn index_matching_at_startup_counts_as_synced_before_any_run() {
 fn a_deleted_index_after_the_sync_is_rebuilt_not_treated_as_foreign() {
     let (_tmp, vault) = vault();
     write(&vault, "a.md", "# A\nalpha\n");
-    let updater = Updater::start(vault.clone(), fake(), fps("a"), false).unwrap();
+    let updater = Updater::start(vault.clone(), fake_embedder(), fps("a"), false).unwrap();
     updater.request();
     wait_for(|| Some(updater.status()).filter(|s| s.synced));
     for suffix in ["", "-wal", "-shm"] {
@@ -145,7 +140,7 @@ fn skipped_files_are_counted_and_a_clean_run_resets_the_count() {
     let (_tmp, vault) = vault();
     write(&vault, "a.md", "# A\nalpha\n");
     std::fs::write(vault.root.join("bad.md"), [0xff, 0xfe, 0x00]).unwrap();
-    let updater = Updater::start(vault.clone(), fake(), fps("a"), false).unwrap();
+    let updater = Updater::start(vault.clone(), fake_embedder(), fps("a"), false).unwrap();
     updater.request();
     let status = wait_for(|| Some(updater.status()).filter(|s| s.synced));
     assert_eq!(status.skipped_files, 1);
@@ -210,7 +205,7 @@ fn observe_reports_another_process_lock_only_while_this_updater_is_idle() {
 fn schema_newer_than_supported_after_the_sync_stops_the_updater() {
     let (_tmp, vault) = vault();
     write(&vault, "a.md", "# A\nalpha\n");
-    let updater = Updater::start(vault.clone(), fake(), fps("a"), false).unwrap();
+    let updater = Updater::start(vault.clone(), fake_embedder(), fps("a"), false).unwrap();
     updater.request();
     wait_for(|| Some(updater.status()).filter(|s| s.synced));
     let newer = (notrieve::store::SCHEMA_VERSION + 1).to_string();
@@ -239,7 +234,7 @@ fn schema_newer_than_supported_before_the_sync_is_a_plain_error() {
             [&newer],
         )
         .unwrap();
-    let updater = Updater::start(vault.clone(), fake(), fps("a"), false).unwrap();
+    let updater = Updater::start(vault.clone(), fake_embedder(), fps("a"), false).unwrap();
     updater.request();
     let status =
         wait_for(|| Some(updater.status()).filter(|s| s.last_error.is_some() && !s.running));
@@ -279,7 +274,7 @@ fn a_change_of_the_index_settings_only_stops_the_updater() {
         model: "model-x".into(),
         index: "index-b".into(),
     };
-    let updater = Updater::start(vault.clone(), fake(), a, false).unwrap();
+    let updater = Updater::start(vault.clone(), fake_embedder(), a, false).unwrap();
     updater.request();
     wait_for(|| Some(updater.status()).filter(|s| s.synced));
     index_as_another_process(&vault, &b);
@@ -292,7 +287,7 @@ fn a_change_of_the_index_settings_only_stops_the_updater() {
 fn a_request_after_the_updater_stopped_performs_no_run() {
     let (_tmp, vault) = vault();
     write(&vault, "a.md", "# A\nalpha\n");
-    let updater = Updater::start(vault.clone(), fake(), fps("a"), false).unwrap();
+    let updater = Updater::start(vault.clone(), fake_embedder(), fps("a"), false).unwrap();
     updater.request();
     wait_for(|| Some(updater.status()).filter(|s| s.synced));
     index_as_another_process(&vault, &fps("b"));

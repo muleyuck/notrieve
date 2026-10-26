@@ -100,44 +100,43 @@ fn refresh_locked(
     let marker = dir.join(COMPLETE_MARKER);
     let refresh = force || !marker.is_file();
     // All-or-nothing: nothing in the cache is replaced until every file has downloaded.
-    let mut staged: Vec<(PathBuf, PathBuf)> = Vec::new();
+    let mut staged = Staged(Vec::new());
     for file in required_files(contract) {
         let target = dir.join(file);
         if refresh || !target.is_file() {
             let url = format!("{base_url}/{repo}/resolve/main/{file}");
-            match download(&url, &target, file, on_event) {
-                Ok(part) => staged.push((part, target)),
-                Err(e) => {
-                    for (part, _) in &staged {
-                        let _ = fs::remove_file(part);
-                    }
-                    return Err(e);
-                }
-            }
+            staged
+                .0
+                .push((download(&url, &target, file, on_event)?, target));
         }
     }
-    if !staged.is_empty() {
-        let discard = |staged: &[(PathBuf, PathBuf)]| {
-            for (part, _) in staged {
-                let _ = fs::remove_file(part);
-            }
-        };
+    if !staged.0.is_empty() {
         match fs::remove_file(&marker) {
             Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
-                discard(&staged);
                 return Err(Error::io(&marker, e));
             }
             _ => {}
         }
-        for (part, target) in &staged {
-            if let Err(e) = fs::rename(part, target) {
-                discard(&staged);
-                return Err(Error::io(target, e));
-            }
+        for (part, target) in &staged.0 {
+            fs::rename(part, target).map_err(|e| Error::io(target, e))?;
         }
+        // Every part is in place; there is nothing left to remove.
+        staged.0.clear();
         fs::write(&marker, "").map_err(|e| Error::io(&marker, e))?;
     }
     Ok(())
+}
+
+/// Downloaded `.part` files and their targets. Dropping it removes the parts, so every early
+/// return leaves no partial file behind.
+struct Staged(Vec<(PathBuf, PathBuf)>);
+
+impl Drop for Staged {
+    fn drop(&mut self) {
+        for (part, _) in &self.0 {
+            let _ = fs::remove_file(part);
+        }
+    }
 }
 
 fn download(

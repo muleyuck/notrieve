@@ -7,7 +7,7 @@ use crate::embed::download::{DownloadEvent, ensure_model, with_model};
 use crate::embed::onnx::resolve_threads;
 use crate::embed::{Embedder, OnnxEmbedder, RemoteEmbedder};
 use crate::fingerprint::{Fingerprints, fingerprints, remote_fingerprints};
-use crate::indexer::scan::{plan_changes, scan_vault};
+use crate::indexer::scan::{count_stale, scan_vault};
 use crate::indexer::{self, IndexEvent, IndexOptions, IndexReport, Progress};
 use crate::lock;
 use crate::search::{self, IndexState, SearchQuery, SearchResponse};
@@ -54,10 +54,7 @@ pub fn open_vault(explicit: Option<&str>, cwd: &Path, paths: &Paths) -> Result<V
 
 pub fn init(cwd: &Path, name: Option<&str>, make_default: bool, paths: &Paths) -> Result<Vault> {
     let root = cwd.canonicalize().map_err(|e| Error::io(cwd, e))?;
-    let name = match name {
-        Some(name) => name.to_string(),
-        None => dir_name(&root)?,
-    };
+    let name = vault_name(name, &root)?;
     Registry::update(&paths.registry, |registry| {
         if registry.vaults.contains_key(&name) {
             return Err(Error::DuplicateVaultName(name.clone()));
@@ -78,10 +75,7 @@ pub fn add_vault(
 ) -> Result<(String, Vec<String>)> {
     let root = path.canonicalize().map_err(|e| Error::io(path, e))?;
     let settings = Vault::load(&root, None)?.trusted_settings();
-    let name = match name {
-        Some(name) => name.to_string(),
-        None => dir_name(&root)?,
-    };
+    let name = vault_name(name, &root)?;
     Registry::update(&paths.registry, |registry| {
         let registered = registry
             .vaults
@@ -157,11 +151,9 @@ pub fn index(
         (Store::open(&db)?, EmbeddingCache::open(&cache_file)?)
     };
     let opts = IndexOptions {
-        exclude: &vault.config.exclude,
-        chunk_max_tokens: vault.config.chunk_max_tokens(),
         budget: request.budget,
-        deadline: None,
         rebuild: request.rebuild,
+        ..IndexOptions::for_vault(&vault.config)
     };
     indexer::index_vault(
         &vault.root,
@@ -216,11 +208,9 @@ pub fn search_vault<E: Embedder + ?Sized>(
         let mut store = Store::open(&db)?;
         let mut cache = EmbeddingCache::open(&cache_path(&db))?;
         let opts = IndexOptions {
-            exclude: &vault.config.exclude,
-            chunk_max_tokens: vault.config.chunk_max_tokens(),
             budget: (!remote).then_some(budget),
             deadline: if remote { update_deadline } else { None },
-            rebuild: false,
+            ..IndexOptions::for_vault(&vault.config)
         };
         match indexer::index_vault(
             &vault.root,
@@ -237,30 +227,24 @@ pub fn search_vault<E: Embedder + ?Sized>(
             Err(e) => return Err(e),
         }
     }
-    let reader = search::open_reader(&db)?;
+    let reader = Store::open_reader(&db)?;
     let scan = scan_vault(&vault.root, &vault.config.exclude)?;
-    let stale_files =
-        plan_changes(&scan, &reader.file_states()?, &reader.skipped_states()?).stale_files();
+    let stale_files = count_stale(&scan, &reader)?;
     // Our own lock was released above, so a held lock belongs to another process (spec §4.5).
-    let index_state = if !scan.complete {
-        IndexState::ScanError
-    } else if lock::try_lock(&vault.lock_path())?.is_none() {
-        IndexState::UpdatingElsewhere
-    } else if stale_files == 0 {
-        IndexState::Fresh
-    } else {
-        IndexState::IdleStale
-    };
+    let index_state = IndexState::classify(
+        scan.complete,
+        false,
+        || Ok(lock::try_lock(&vault.lock_path())?.is_none()),
+        stale_files,
+    )?;
     let query_deadline = remote.then(|| (started + budget).max(Instant::now() + QUERY_RESERVE));
     let found = search::search(&reader, embedder, &fps.index, query, query_deadline)?;
-    Ok(SearchResponse {
-        vector_search: found.vector_search(),
-        vector_error: found.vector_error,
-        results: found.hits,
+    Ok(SearchResponse::new(
+        found,
         stale_files,
         index_state,
         indexer_error,
-    })
+    ))
 }
 
 /// Loads the vault's model and computes its fingerprints. A local model is read while the model
@@ -326,6 +310,14 @@ fn acquire(
     }
     on_event(Event::WaitingForLock);
     lock::lock_blocking(&path)
+}
+
+/// `name`, or the directory name when none is given.
+fn vault_name(name: Option<&str>, root: &Path) -> Result<String> {
+    match name {
+        Some(name) => Ok(name.to_string()),
+        None => dir_name(root),
+    }
 }
 
 fn dir_name(root: &Path) -> Result<String> {

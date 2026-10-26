@@ -1,14 +1,13 @@
 //! Hybrid search (spec §4.5): FTS5 trigram and LIKE for text, cosine distance over the embedding
 //! cache for vectors, fused with reciprocal rank fusion.
 use std::collections::HashMap;
-use std::path::Path;
 use std::time::Instant;
 
 use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension, params_from_iter};
 use serde::Serialize;
 
-use crate::cache::{cache_path, f32_blob};
+use crate::cache::f32_blob;
 use crate::embed::Embedder;
 use crate::error::RemoteErrorKind;
 use crate::store::Store;
@@ -82,6 +81,27 @@ pub enum IndexState {
 }
 
 impl IndexState {
+    /// Spec §4.5, in this order. `updating_here` is this process's own background indexer (MCP);
+    /// `locked_elsewhere` is asked only when nothing before it decided.
+    pub fn classify(
+        scan_complete: bool,
+        updating_here: bool,
+        locked_elsewhere: impl FnOnce() -> Result<bool>,
+        stale_files: usize,
+    ) -> Result<Self> {
+        Ok(if !scan_complete {
+            IndexState::ScanError
+        } else if updating_here {
+            IndexState::Updating
+        } else if locked_elsewhere()? {
+            IndexState::UpdatingElsewhere
+        } else if stale_files == 0 {
+            IndexState::Fresh
+        } else {
+            IndexState::IdleStale
+        })
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             IndexState::Fresh => "fresh",
@@ -118,6 +138,24 @@ pub struct SearchResponse {
     pub vector_error: Option<String>,
 }
 
+impl SearchResponse {
+    pub fn new(
+        found: SearchResults,
+        stale_files: usize,
+        index_state: IndexState,
+        indexer_error: Option<String>,
+    ) -> Self {
+        Self {
+            vector_search: found.vector_search(),
+            vector_error: found.vector_error,
+            results: found.hits,
+            stale_files,
+            index_state,
+            indexer_error,
+        }
+    }
+}
+
 /// What `search` found, and why the vector side was left out when it was.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SearchResults {
@@ -135,23 +173,7 @@ impl SearchResults {
     }
 }
 
-/// Opens the index for searching, with its embedding cache attached as `cache`.
-pub fn open_reader(db_path: &Path) -> Result<Store> {
-    let cache = cache_path(db_path);
-    if !cache.is_file() {
-        return Err(Error::IndexNotReady);
-    }
-    let store = Store::open(db_path)?;
-    let cache = cache
-        .to_str()
-        .ok_or_else(|| Error::Config(format!("{} is not valid UTF-8", cache.display())))?;
-    store
-        .conn()
-        .execute("ATTACH DATABASE ?1 AS cache", [cache])?;
-    Ok(store)
-}
-
-/// `store` must come from `open_reader`; `fingerprint` is this process's index fingerprint.
+/// `store` must come from `Store::open_reader`; `fingerprint` is this process's index fingerprint.
 /// `deadline` bounds embedding the query with a remote model.
 pub fn search<E: Embedder + ?Sized>(
     store: &Store,
@@ -166,10 +188,10 @@ pub fn search<E: Embedder + ?Sized>(
     // first read, so the cache goes first: a writer between the two reads can then only add chunks
     // whose vectors this snapshot lacks (they drop out of the vector side), never leave old chunks
     // whose vectors a garbage collection already removed.
-    let tx = store.conn().unchecked_transaction()?;
+    let tx = store.read_snapshot()?;
     tx.query_row("SELECT 1 FROM cache.embeddings LIMIT 1", [], |_| Ok(()))
         .optional()?;
-    if stored_fingerprint(&tx)?.as_deref() != Some(fingerprint) {
+    if store.fingerprint()?.as_deref() != Some(fingerprint) {
         return Err(Error::IndexNotReady);
     }
     let (vector, vector_error) = match embedder.embed_query_within(text, deadline) {
@@ -220,24 +242,6 @@ fn check_query_dim(conn: &Connection, dim: usize) -> Result<()> {
         }),
         _ => Ok(()),
     }
-}
-
-fn stored_fingerprint(conn: &Connection) -> Result<Option<String>> {
-    let has_meta: i64 = conn.query_row(
-        "SELECT count(*) FROM main.sqlite_master WHERE type = 'table' AND name = 'meta'",
-        [],
-        |r| r.get(0),
-    )?;
-    if has_meta == 0 {
-        return Ok(None);
-    }
-    Ok(conn
-        .query_row(
-            "SELECT value FROM meta WHERE key = 'index_fingerprint'",
-            [],
-            |r| r.get(0),
-        )
-        .optional()?)
 }
 
 /// A WHERE fragment over `chunks c JOIN files f`, applied before candidates are cut (spec §4.5).
@@ -503,6 +507,25 @@ mod tests {
                 &serde_json::json!("down")
             )
         );
+    }
+
+    #[test]
+    fn index_state_asks_about_other_processes_only_when_nothing_before_decides() {
+        let never = || -> Result<bool> { panic!("the lock was probed") };
+        let state = |complete, here, elsewhere: bool, stale| {
+            IndexState::classify(complete, here, || Ok(elsewhere), stale).unwrap()
+        };
+        assert_eq!(
+            IndexState::classify(false, true, never, 0).unwrap(),
+            IndexState::ScanError
+        );
+        assert_eq!(
+            IndexState::classify(true, true, never, 0).unwrap(),
+            IndexState::Updating
+        );
+        assert_eq!(state(true, false, true, 0), IndexState::UpdatingElsewhere);
+        assert_eq!(state(true, false, false, 0), IndexState::Fresh);
+        assert_eq!(state(true, false, false, 2), IndexState::IdleStale);
     }
 
     #[test]

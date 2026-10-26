@@ -7,7 +7,7 @@ use std::fmt;
 
 use rusqlite::{Connection, ErrorCode, OptionalExtension, Transaction, params};
 
-use crate::cache::EmbeddingKey;
+use crate::cache::{EmbeddingKey, cache_path, read_cache_id};
 use crate::fingerprint::Fingerprints;
 use crate::{Error, Result};
 
@@ -123,6 +123,31 @@ impl Store {
             });
         }
         Ok(store)
+    }
+
+    /// Opens the index for searching, with its embedding cache attached as `cache`.
+    pub fn open_reader(path: &Path) -> Result<Self> {
+        let cache = cache_path(path);
+        if !cache.is_file() {
+            return Err(Error::IndexNotReady);
+        }
+        let store = Self::open(path)?;
+        let cache = cache
+            .to_str()
+            .ok_or_else(|| Error::Config(format!("{} is not valid UTF-8", cache.display())))?;
+        store.conn.execute("ATTACH DATABASE ?1 AS cache", [cache])?;
+        Ok(store)
+    }
+
+    /// Whether the cache attached by `open_reader` is the one the index was built against.
+    pub fn attached_cache_matches(&self) -> Result<bool> {
+        let attached = read_cache_id(&self.conn, "cache.meta")?;
+        Ok(attached.is_some() && attached == self.cache_id()?)
+    }
+
+    /// A read transaction: every query through it sees one snapshot of the index.
+    pub fn read_snapshot(&self) -> Result<Transaction<'_>> {
+        Ok(self.conn.unchecked_transaction()?)
     }
 
     /// Opens for an explicit rebuild: a newer schema is accepted, and a file that is not a database

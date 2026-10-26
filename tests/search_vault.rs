@@ -1,34 +1,12 @@
+mod support;
+
 use std::fs;
 
 use notrieve::app::search_vault;
-use notrieve::config::Vault;
 use notrieve::embed::fake::FakeEmbedder;
-use notrieve::fingerprint::Fingerprints;
 use notrieve::lock;
 use notrieve::search::{IndexState, SearchQuery};
-use tempfile::TempDir;
-
-fn fps() -> Fingerprints {
-    Fingerprints {
-        model: "model-a".into(),
-        index: "fp-a".into(),
-    }
-}
-
-fn vault_with(config: &str) -> (TempDir, Vault) {
-    let tmp = TempDir::new().unwrap();
-    let root = tmp.path().join("notes");
-    fs::create_dir_all(root.join(".notrieve")).unwrap();
-    fs::write(root.join(".notrieve/config.toml"), config).unwrap();
-    let vault = Vault::load(&root, None).unwrap();
-    (tmp, vault)
-}
-
-fn write(vault: &Vault, rel: &str, text: &str) {
-    let path = vault.root.join(rel);
-    fs::create_dir_all(path.parent().unwrap()).unwrap();
-    fs::write(path, text).unwrap();
-}
+use support::{fps, vault_with, write};
 
 #[test]
 fn search_indexes_new_notes_within_the_budget_and_reports_a_fresh_index() {
@@ -43,7 +21,7 @@ fn search_indexes_new_notes_within_the_budget_and_reports_a_fresh_index() {
     let r = search_vault(
         &vault,
         &e,
-        &fps(),
+        &fps("a"),
         &SearchQuery::new("医療費控除"),
         &mut |_| {},
     )
@@ -59,7 +37,14 @@ fn exhausted_budget_leaves_the_changes_and_reports_idle_stale() {
     write(&vault, "a.md", "alpha beta\n");
     write(&vault, "b.md", "gamma delta\n");
     let e = FakeEmbedder::new(16);
-    let r = search_vault(&vault, &e, &fps(), &SearchQuery::new("alpha"), &mut |_| {}).unwrap();
+    let r = search_vault(
+        &vault,
+        &e,
+        &fps("a"),
+        &SearchQuery::new("alpha"),
+        &mut |_| {},
+    )
+    .unwrap();
     assert_eq!(
         (r.results.len(), r.stale_files, r.index_state),
         (0, 2, IndexState::IdleStale)
@@ -72,10 +57,24 @@ fn lock_held_elsewhere_skips_the_update_and_reports_updating_elsewhere() {
     let (_tmp, vault) = vault_with("");
     write(&vault, "a.md", "alpha beta\n");
     let e = FakeEmbedder::new(16);
-    search_vault(&vault, &e, &fps(), &SearchQuery::new("alpha"), &mut |_| {}).unwrap();
+    search_vault(
+        &vault,
+        &e,
+        &fps("a"),
+        &SearchQuery::new("alpha"),
+        &mut |_| {},
+    )
+    .unwrap();
     write(&vault, "b.md", "gamma delta\n");
     let _held = lock::try_lock(&vault.lock_path()).unwrap().unwrap();
-    let r = search_vault(&vault, &e, &fps(), &SearchQuery::new("gamma"), &mut |_| {}).unwrap();
+    let r = search_vault(
+        &vault,
+        &e,
+        &fps("a"),
+        &SearchQuery::new("gamma"),
+        &mut |_| {},
+    )
+    .unwrap();
     assert_eq!(
         (r.stale_files, r.index_state),
         (1, IndexState::UpdatingElsewhere)
@@ -88,10 +87,24 @@ fn lock_held_elsewhere_is_reported_even_when_nothing_is_stale() {
     let (_tmp, vault) = vault_with("");
     write(&vault, "a.md", "alpha beta\n");
     let e = FakeEmbedder::new(16);
-    let free = search_vault(&vault, &e, &fps(), &SearchQuery::new("alpha"), &mut |_| {}).unwrap();
+    let free = search_vault(
+        &vault,
+        &e,
+        &fps("a"),
+        &SearchQuery::new("alpha"),
+        &mut |_| {},
+    )
+    .unwrap();
     assert_eq!((free.stale_files, free.index_state), (0, IndexState::Fresh));
     let _held = lock::try_lock(&vault.lock_path()).unwrap().unwrap();
-    let r = search_vault(&vault, &e, &fps(), &SearchQuery::new("alpha"), &mut |_| {}).unwrap();
+    let r = search_vault(
+        &vault,
+        &e,
+        &fps("a"),
+        &SearchQuery::new("alpha"),
+        &mut |_| {},
+    )
+    .unwrap();
     assert_eq!(
         (r.stale_files, r.index_state),
         (0, IndexState::UpdatingElsewhere)
@@ -103,7 +116,8 @@ fn invalid_query_fails_before_anything_is_indexed() {
     let (_tmp, vault) = vault_with("");
     write(&vault, "a.md", "alpha beta\n");
     let e = FakeEmbedder::new(16);
-    let err = search_vault(&vault, &e, &fps(), &SearchQuery::new("  "), &mut |_| {}).unwrap_err();
+    let err =
+        search_vault(&vault, &e, &fps("a"), &SearchQuery::new("  "), &mut |_| {}).unwrap_err();
     assert!(matches!(err, notrieve::Error::InvalidQuery(_)), "{err}");
     assert!(!vault.db_path().exists());
 }
@@ -116,7 +130,14 @@ fn unreadable_directory_reports_a_scan_error() {
     write(&vault, "a.md", "alpha beta\n");
     write(&vault, "locked/x.md", "x\n");
     let e = FakeEmbedder::new(16);
-    search_vault(&vault, &e, &fps(), &SearchQuery::new("alpha"), &mut |_| {}).unwrap();
+    search_vault(
+        &vault,
+        &e,
+        &fps("a"),
+        &SearchQuery::new("alpha"),
+        &mut |_| {},
+    )
+    .unwrap();
     let locked = vault.root.join("locked");
     fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
     if fs::read_dir(&locked).is_ok() {
@@ -124,7 +145,13 @@ fn unreadable_directory_reports_a_scan_error() {
         eprintln!("skipped: permissions are not enforced for this user");
         return;
     }
-    let r = search_vault(&vault, &e, &fps(), &SearchQuery::new("alpha"), &mut |_| {});
+    let r = search_vault(
+        &vault,
+        &e,
+        &fps("a"),
+        &SearchQuery::new("alpha"),
+        &mut |_| {},
+    );
     fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
     assert_eq!(r.unwrap().index_state, IndexState::ScanError);
 }
@@ -137,7 +164,14 @@ fn scan_error_takes_precedence_over_a_lock_held_elsewhere() {
     write(&vault, "a.md", "alpha beta\n");
     write(&vault, "locked/x.md", "x\n");
     let e = FakeEmbedder::new(16);
-    search_vault(&vault, &e, &fps(), &SearchQuery::new("alpha"), &mut |_| {}).unwrap();
+    search_vault(
+        &vault,
+        &e,
+        &fps("a"),
+        &SearchQuery::new("alpha"),
+        &mut |_| {},
+    )
+    .unwrap();
     let locked = vault.root.join("locked");
     fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
     if fs::read_dir(&locked).is_ok() {
@@ -146,7 +180,13 @@ fn scan_error_takes_precedence_over_a_lock_held_elsewhere() {
         return;
     }
     let held = lock::try_lock(&vault.lock_path()).unwrap().unwrap();
-    let r = search_vault(&vault, &e, &fps(), &SearchQuery::new("alpha"), &mut |_| {});
+    let r = search_vault(
+        &vault,
+        &e,
+        &fps("a"),
+        &SearchQuery::new("alpha"),
+        &mut |_| {},
+    );
     drop(held);
     fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
     assert_eq!(r.unwrap().index_state, IndexState::ScanError);
@@ -159,13 +199,27 @@ fn unindexable_file_does_not_keep_the_index_stale() {
     fs::write(vault.root.join("bad.md"), [0xff, 0xfe, 0x00]).unwrap();
     let e = FakeEmbedder::new(16);
     for _ in 0..2 {
-        let r = search_vault(&vault, &e, &fps(), &SearchQuery::new("alpha"), &mut |_| {}).unwrap();
+        let r = search_vault(
+            &vault,
+            &e,
+            &fps("a"),
+            &SearchQuery::new("alpha"),
+            &mut |_| {},
+        )
+        .unwrap();
         assert_eq!((r.stale_files, r.index_state), (0, IndexState::Fresh));
     }
     write(&vault, "bad.md", "recovered gamma text\n");
-    let r = search_vault(&vault, &e, &fps(), &SearchQuery::new("gamma"), &mut |_| {}).unwrap();
+    let r = search_vault(
+        &vault,
+        &e,
+        &fps("a"),
+        &SearchQuery::new("gamma"),
+        &mut |_| {},
+    )
+    .unwrap();
     assert_eq!((r.stale_files, r.index_state), (0, IndexState::Fresh));
     assert!(r.results.iter().any(|x| x.path == "bad.md"));
-    let store = notrieve::search::open_reader(&vault.db_path()).unwrap();
+    let store = notrieve::store::Store::open_reader(&vault.db_path()).unwrap();
     assert!(store.skipped_states().unwrap().is_empty());
 }
