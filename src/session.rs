@@ -74,8 +74,7 @@ impl Session {
     /// Spec §5.4: light scan, signal the updater when there are changes, then search (§4.5).
     pub fn search(&self, query: &SearchQuery) -> Result<SearchResponse> {
         query.validate()?;
-        // Before `observe`, which probes the lock and so creates its file next to the index.
-        self.vault.ensure_index_location(&self.index_location)?;
+        // `observe` checks the index location before it probes the lock.
         let seen = self.updater.observe()?;
         refuse_while_unusable(&seen.status)?;
         let reader = self.open_index(seen.status.synced, Store::open_reader)?;
@@ -169,6 +168,16 @@ impl Session {
             Some(false) => return Err(Error::NoteNotIndexed(path.to_string())),
             Some(true) => {}
         }
+        // The index is not proof on its own: one brought along with a cloned vault can list any
+        // file. The note must also be one a complete scan lists now; rules that fail to parse refuse.
+        let scan = scan_vault(&self.vault.root, &self.vault.config.exclude)?;
+        // A directory that could not be listed may hold ignore rules that were never applied.
+        if !scan.complete {
+            return Err(Error::ScanIncomplete(scan.errors.join("; ")));
+        }
+        if !scan.entries.iter().any(|entry| entry.rel == path) {
+            return Err(Error::NoteNotIndexed(path.to_string()));
+        }
         read_note(&self.root, path, start_line, end_line)
     }
 
@@ -209,6 +218,7 @@ impl Session {
     }
 
     fn changed_elsewhere(&self) -> Result<bool> {
+        self.vault.ensure_index_location(&self.index_location)?;
         let db = self.vault.db_path();
         if !db.is_file() {
             return Ok(false);

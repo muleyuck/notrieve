@@ -86,6 +86,8 @@ pub enum Error {
     NoteNotFound(String),
     #[error("`{0}` is not an indexed note; pass a path from the search results")]
     NoteNotIndexed(String),
+    #[error("the vault could not be scanned completely ({0}); notes are not readable until it can")]
+    ScanIncomplete(String),
     #[error("invalid line range: {0}")]
     InvalidLineRange(String),
     /// A background indexer failure; the message is complete (it names the indexer).

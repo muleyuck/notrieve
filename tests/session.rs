@@ -40,6 +40,60 @@ fn q(text: &str) -> SearchQuery {
     SearchQuery::new(text)
 }
 
+/// An unreadable directory can hide ignore rules, so a partial scan cannot vouch for any note.
+#[cfg(unix)]
+#[test]
+fn get_note_refuses_while_the_vault_cannot_be_scanned_completely() {
+    use std::os::unix::fs::PermissionsExt;
+    let (_tmp, vault) = vault();
+    write(&vault, "a.md", "# A\nalpha\n");
+    write(&vault, "private/b.md", "# B\nbeta\n");
+    let private = vault.root.join("private");
+    let session = Session::with_embedder(vault, fake_embedder(), fps("a")).unwrap();
+    wait_for(|| {
+        session
+            .search(&q("alpha"))
+            .ok()
+            .filter(|r| r.index_state == IndexState::Fresh)
+    });
+    std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let result = session.get_note("a.md", None, None);
+    std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let err = result.unwrap_err();
+    assert!(matches!(err, Error::ScanIncomplete(_)), "{err}");
+}
+
+#[test]
+fn get_note_refuses_a_file_the_index_lists_but_the_scan_leaves_out() {
+    let (_tmp, vault) = vault();
+    write(&vault, "a.md", "# A\nalpha\n");
+    write(&vault, ".env", "SECRET=1\n");
+    let db = vault.db_path();
+    let session = Session::with_embedder(vault, fake_embedder(), fps("a")).unwrap();
+    wait_for(|| {
+        session
+            .search(&q("alpha"))
+            .ok()
+            .filter(|r| r.index_state == IndexState::Fresh)
+    });
+    // An index brought along with a cloned vault can list any file.
+    let mut store = notrieve::store::Store::open(&db).unwrap();
+    let row = notrieve::store::FileRecord {
+        path: ".env".into(),
+        mtime_ns: 0,
+        size: 9,
+        content_hash: "h".into(),
+        title: ".env".into(),
+        aliases: Vec::new(),
+        tags: Vec::new(),
+        frontmatter: None,
+    };
+    store.write_file(&fps("a").index, &row, &[]).unwrap();
+    let err = session.get_note(".env", None, None).unwrap_err();
+    assert!(matches!(err, Error::NoteNotIndexed(_)), "{err}");
+    assert!(!err.to_string().contains("SECRET"));
+}
+
 #[cfg(unix)]
 #[test]
 fn relinking_the_index_directory_while_serving_asks_for_a_restart_before_writing_there() {
