@@ -91,8 +91,8 @@ impl VaultConfig {
     }
 }
 
-pub fn config_home_from(xdg: Option<OsString>, home: Option<OsString>) -> Option<PathBuf> {
-    dir_from(xdg, home, ".config")
+pub fn state_home_from(xdg: Option<OsString>, home: Option<OsString>) -> Option<PathBuf> {
+    dir_from(xdg, home, ".local/state")
 }
 
 pub fn cache_home_from(xdg: Option<OsString>, home: Option<OsString>) -> Option<PathBuf> {
@@ -109,13 +109,12 @@ fn dir_from(xdg: Option<OsString>, home: Option<OsString>, fallback: &str) -> Op
     }
 }
 
+/// The registry holds this machine's vault paths and what the user approved there, so it is
+/// state (XDG_STATE_HOME), not configuration to carry to other machines (XDG_CONFIG_HOME).
 pub fn registry_path() -> Result<PathBuf> {
-    config_home_from(
-        std::env::var_os("XDG_CONFIG_HOME"),
-        std::env::var_os("HOME"),
-    )
-    .map(|d| d.join("notrieve").join("vaults.toml"))
-    .ok_or_else(|| Error::Config("neither XDG_CONFIG_HOME nor HOME is set".into()))
+    state_home_from(std::env::var_os("XDG_STATE_HOME"), std::env::var_os("HOME"))
+        .map(|d| d.join("notrieve").join("vaults.toml"))
+        .ok_or_else(|| Error::Config("neither XDG_STATE_HOME nor HOME is set".into()))
 }
 
 pub fn model_cache_dir() -> Result<PathBuf> {
@@ -229,15 +228,15 @@ mod tests {
 
     #[test]
     fn xdg_dir_wins_over_home() {
-        let got = config_home_from(Some("/xdg".into()), Some("/home/u".into()));
+        let got = state_home_from(Some("/xdg".into()), Some("/home/u".into()));
         assert_eq!(got, Some(PathBuf::from("/xdg")));
     }
 
     #[test]
     fn relative_xdg_dir_is_ignored() {
         assert_eq!(
-            config_home_from(Some("rel/dir".into()), Some("/home/u".into())),
-            Some(PathBuf::from("/home/u/.config"))
+            state_home_from(Some("rel/dir".into()), Some("/home/u".into())),
+            Some(PathBuf::from("/home/u/.local/state"))
         );
         assert_eq!(
             cache_home_from(Some("./cache".into()), Some("/home/u".into())),
@@ -250,10 +249,10 @@ mod tests {
     }
 
     #[test]
-    fn home_dot_config_is_the_fallback() {
+    fn dot_directories_under_home_are_the_fallback() {
         assert_eq!(
-            config_home_from(Some("".into()), Some("/home/u".into())),
-            Some(PathBuf::from("/home/u/.config"))
+            state_home_from(Some("".into()), Some("/home/u".into())),
+            Some(PathBuf::from("/home/u/.local/state"))
         );
         assert_eq!(
             cache_home_from(None, Some("/home/u".into())),
