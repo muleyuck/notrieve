@@ -10,11 +10,111 @@ use notrieve::session::Session;
 use notrieve::{Error, RemoteErrorKind};
 use support::{
     FlakyRemote, GateEmbedder, PanicEmbedder, fake_embedder, fps, index_as_another_process,
-    index_with, indexed_paths, vault, wait_for, write,
+    index_with, indexed_paths, vault, vault_with, wait_for, write,
 };
+
+/// A vault whose index lives in `data/`, and a function that swaps `data/` for a link to a new
+/// directory outside the vault, as a sync could while a process runs. The function returns that
+/// outside directory.
+#[cfg(unix)]
+fn vault_with_a_data_dir() -> (
+    tempfile::TempDir,
+    notrieve::config::Vault,
+    impl Fn() -> std::path::PathBuf,
+) {
+    let (tmp, vault) = vault_with("db_path = \"data/index.db\"\n");
+    std::fs::create_dir_all(vault.root.join("data")).unwrap();
+    let base = tmp.path().to_path_buf();
+    let root = vault.root.clone();
+    let relink = move || {
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::rename(root.join("data"), base.join("old-data")).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("data")).unwrap();
+        outside
+    };
+    (tmp, vault, relink)
+}
 
 fn q(text: &str) -> SearchQuery {
     SearchQuery::new(text)
+}
+
+/// An unreadable directory can hide ignore rules, so a partial scan cannot vouch for any note.
+#[cfg(unix)]
+#[test]
+fn get_note_refuses_while_the_vault_cannot_be_scanned_completely() {
+    use std::os::unix::fs::PermissionsExt;
+    let (_tmp, vault) = vault();
+    write(&vault, "a.md", "# A\nalpha\n");
+    write(&vault, "private/b.md", "# B\nbeta\n");
+    let private = vault.root.join("private");
+    let session = Session::with_embedder(vault, fake_embedder(), fps("a")).unwrap();
+    wait_for(|| {
+        session
+            .search(&q("alpha"))
+            .ok()
+            .filter(|r| r.index_state == IndexState::Fresh)
+    });
+    std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let result = session.get_note("a.md", None, None);
+    std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let err = result.unwrap_err();
+    assert!(matches!(err, Error::ScanIncomplete(_)), "{err}");
+}
+
+#[test]
+fn get_note_refuses_a_file_the_index_lists_but_the_scan_leaves_out() {
+    let (_tmp, vault) = vault();
+    write(&vault, "a.md", "# A\nalpha\n");
+    write(&vault, ".env", "SECRET=1\n");
+    let db = vault.db_path();
+    let session = Session::with_embedder(vault, fake_embedder(), fps("a")).unwrap();
+    wait_for(|| {
+        session
+            .search(&q("alpha"))
+            .ok()
+            .filter(|r| r.index_state == IndexState::Fresh)
+    });
+    // An index brought along with a cloned vault can list any file.
+    let mut store = notrieve::store::Store::open(&db).unwrap();
+    let row = notrieve::store::FileRecord {
+        path: ".env".into(),
+        mtime_ns: 0,
+        size: 9,
+        content_hash: "h".into(),
+        title: ".env".into(),
+        aliases: Vec::new(),
+        tags: Vec::new(),
+        frontmatter: None,
+    };
+    store.write_file(&fps("a").index, &row, &[]).unwrap();
+    let err = session.get_note(".env", None, None).unwrap_err();
+    assert!(matches!(err, Error::NoteNotIndexed(_)), "{err}");
+    assert!(!err.to_string().contains("SECRET"));
+}
+
+#[cfg(unix)]
+#[test]
+fn relinking_the_index_directory_while_serving_asks_for_a_restart_before_writing_there() {
+    let (_tmp, vault, relink) = vault_with_a_data_dir();
+    write(&vault, "a.md", "# A\nalpha\n");
+    let session = Session::with_embedder(vault, fake_embedder(), fps("a")).unwrap();
+    wait_for(|| {
+        session
+            .search(&q("alpha"))
+            .ok()
+            .filter(|r| r.index_state == IndexState::Fresh)
+    });
+    let outside = relink();
+    let errors = [
+        session.search(&q("alpha")).unwrap_err(),
+        session.get_note("a.md", None, None).unwrap_err(),
+    ];
+    for err in errors {
+        assert!(matches!(err, Error::FingerprintChanged), "{err}");
+    }
+    assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0);
 }
 
 #[test]

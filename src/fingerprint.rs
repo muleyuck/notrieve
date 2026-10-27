@@ -1,4 +1,5 @@
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
@@ -84,7 +85,10 @@ fn file_hash(path: &Path) -> Result<String> {
         .map_or(0, |d| d.as_nanos());
     let stamp = format!("{} {mtime}", meta.len());
     let cache = sidecar(path);
-    if let Ok(text) = fs::read_to_string(&cache)
+    // Only a regular file: a link or a FIFO planted in a model directory is not read.
+    let regular = fs::symlink_metadata(&cache).is_ok_and(|m| m.is_file());
+    if regular
+        && let Ok(text) = fs::read_to_string(&cache)
         && let Some((cached_stamp, hash)) = text.trim_end().rsplit_once(' ')
         && cached_stamp == stamp
     {
@@ -95,8 +99,24 @@ fn file_hash(path: &Path) -> Result<String> {
         .update_reader(File::open(path).map_err(|e| Error::io(path, e))?)
         .map_err(|e| Error::io(path, e))?;
     let hash = hasher.finalize().to_hex().to_string();
-    let _ = fs::write(&cache, format!("{stamp} {hash}\n"));
+    let _ = replace_file(&cache, &format!("{stamp} {hash}\n"));
     Ok(hash)
+}
+
+/// Writes a new file and renames it over `path`. A model directory can sit in a vault that came
+/// from someone else, and a rename replaces a link at `path` instead of writing through it.
+fn replace_file(path: &Path, text: &str) -> std::io::Result<()> {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(format!(".{}.tmp", std::process::id()));
+    let tmp = path.with_file_name(name);
+    let mut file = OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+    let written = file
+        .write_all(text.as_bytes())
+        .and_then(|()| fs::rename(&tmp, path));
+    if written.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    written
 }
 
 fn sidecar(path: &Path) -> PathBuf {
@@ -139,6 +159,57 @@ mod tests {
             query_prefix: "q: ".into(),
             document_prefix: "d: ".into(),
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_hash_cache_that_is_not_a_regular_file_is_not_read() {
+        use std::os::unix::ffi::OsStrExt;
+        let dir = TempDir::new().unwrap();
+        let c = model(dir.path());
+        // Reading a FIFO would block until a writer appears.
+        let fifo = dir.path().join(".tokenizer.json.blake3");
+        let path = std::ffi::CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let root = dir.path().to_path_buf();
+        std::thread::spawn(move || {
+            let _ = tx.send(fingerprints(&c, &root, 450).is_ok());
+        });
+        let finished = rx.recv_timeout(std::time::Duration::from_secs(5));
+        assert_eq!(finished, Ok(true));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_hash_cache_reached_through_a_link_is_not_trusted() {
+        let dir = TempDir::new().unwrap();
+        model(dir.path());
+        let file = dir.path().join("tokenizer.json");
+        let real = file_hash(&file).unwrap();
+        let cache = sidecar(&file);
+        let stamp = fs::read_to_string(&cache).unwrap();
+        let (stamp, _) = stamp.trim_end().rsplit_once(' ').unwrap();
+        let forged = dir.path().join("forged");
+        fs::write(&forged, format!("{stamp} forged-hash\n")).unwrap();
+        fs::remove_file(&cache).unwrap();
+        std::os::unix::fs::symlink(&forged, &cache).unwrap();
+        assert_eq!(file_hash(&file).unwrap(), real);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_at_a_hash_cache_file_is_replaced_not_written_through() {
+        let dir = TempDir::new().unwrap();
+        let victim = dir.path().join("victim.txt");
+        fs::write(&victim, "keep").unwrap();
+        let models = dir.path().join("models");
+        let c = model(&models);
+        let cache = models.join(".tokenizer.json.blake3");
+        std::os::unix::fs::symlink(&victim, &cache).unwrap();
+        fingerprints(&c, &models, 450).unwrap();
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "keep");
+        assert!(!cache.symlink_metadata().unwrap().file_type().is_symlink());
     }
 
     #[test]

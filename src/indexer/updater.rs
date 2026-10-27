@@ -1,7 +1,7 @@
 //! Background index updates for a long-running process (MCP; spec §4.6, §5.4).
 use std::any::Any;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -89,7 +89,9 @@ impl Shared {
 
 pub struct Updater {
     shared: Arc<Shared>,
-    lock_path: PathBuf,
+    vault: Vault,
+    /// Where the index was at startup; see `Vault::ensure_index_location`.
+    location: PathBuf,
 }
 
 impl Updater {
@@ -118,15 +120,29 @@ impl Updater {
             state: Mutex::new(state),
             wake: Condvar::new(),
         });
-        let lock_path = vault.lock_path();
+        let location = vault.index_location();
+        let (thread_vault, thread_location) = (vault.clone(), location.clone());
         let thread_shared = Arc::clone(&shared);
         std::thread::Builder::new()
             .name("notrieve-indexer".into())
-            .spawn(move || run_loop(&thread_shared, &vault, embedder.as_ref(), &fps, backoff))
+            .spawn(move || {
+                run_loop(
+                    &thread_shared,
+                    &thread_vault,
+                    &thread_location,
+                    embedder.as_ref(),
+                    &fps,
+                    backoff,
+                )
+            })
             .map_err(|e| {
                 Error::IndexerFailed(format!("cannot start the background indexer: {e}"))
             })?;
-        Ok(Self { shared, lock_path })
+        Ok(Self {
+            shared,
+            vault,
+            location,
+        })
     }
 
     /// Asks for a run. Requests made while a run is in progress coalesce into one more run.
@@ -148,8 +164,11 @@ impl Updater {
     /// Probes the write lock while the state is locked. A run marks itself `running` under the same
     /// lock before taking the write lock, so a held lock seen here belongs to another process.
     pub fn observe(&self) -> Result<Observation> {
+        // The probe creates the lock file next to the index.
+        self.vault.ensure_index_location(&self.location)?;
         let state = self.shared.lock();
-        let locked_elsewhere = !state.status.running && lock::try_lock(&self.lock_path)?.is_none();
+        let locked_elsewhere =
+            !state.status.running && lock::try_lock(&self.vault.lock_path())?.is_none();
         Ok(Observation {
             status: state.status.clone(),
             locked_elsewhere,
@@ -166,9 +185,11 @@ impl Drop for Updater {
     }
 }
 
+/// `location` is where the index was when the updater started (`Vault::ensure_index_location`).
 fn run_loop(
     shared: &Shared,
     vault: &Vault,
+    location: &Path,
     embedder: &dyn Embedder,
     fps: &Fingerprints,
     backoff: Backoff,
@@ -176,7 +197,7 @@ fn run_loop(
     lower_priority();
     while let Some(synced) = wait_for_run(shared) {
         let outcome = catch_unwind(AssertUnwindSafe(|| {
-            run_once(shared, vault, embedder, fps, synced)
+            run_once(shared, vault, location, embedder, fps, synced)
         }));
         record_outcome(&mut shared.lock(), backoff, outcome);
     }
@@ -275,10 +296,13 @@ fn record_outcome(
 fn run_once(
     shared: &Shared,
     vault: &Vault,
+    location: &Path,
     embedder: &dyn Embedder,
     fps: &Fingerprints,
     synced: bool,
 ) -> Result<Option<IndexReport>> {
+    // Before the lock, which creates its file next to the index.
+    vault.ensure_index_location(location)?;
     let Some(_lock) = lock::try_lock(&vault.lock_path())? else {
         return Ok(None);
     };
