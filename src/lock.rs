@@ -36,6 +36,15 @@ pub fn lock_blocking(path: &Path) -> Result<WriteLock> {
     Ok(WriteLock { _file: file })
 }
 
+/// Locks the directory itself (created if missing), so no lock file is left next to the files
+/// it guards. Files replaced by a rename inside it stay covered.
+pub fn lock_directory(dir: &Path) -> Result<WriteLock> {
+    std::fs::create_dir_all(dir).map_err(|e| Error::io(dir, e))?;
+    let file = File::open(dir).map_err(|e| Error::io(dir, e))?;
+    file.lock().map_err(|e| Error::io(dir, e))?;
+    Ok(WriteLock { _file: file })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -50,5 +59,16 @@ mod tests {
         assert!(try_lock(&path).unwrap().is_none());
         drop(first);
         assert!(try_lock(&path).unwrap().is_some());
+    }
+
+    #[test]
+    fn a_locked_directory_refuses_a_second_lock_until_released() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("notrieve");
+        let first = lock_directory(&path).unwrap();
+        let second = File::open(&path).unwrap();
+        assert!(matches!(second.try_lock(), Err(TryLockError::WouldBlock)));
+        drop(first);
+        assert!(second.try_lock().is_ok());
     }
 }

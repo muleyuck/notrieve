@@ -26,7 +26,7 @@ impl Env {
             .args(args)
             .current_dir(cwd)
             .env("HOME", self.home.path())
-            .env("XDG_CONFIG_HOME", self.home.path().join("config"))
+            .env("XDG_STATE_HOME", self.home.path().join("state"))
             .env("XDG_CACHE_HOME", self.home.path().join("cache"))
             .env_remove("NOTRIEVE_LOG");
         command
@@ -63,6 +63,25 @@ fn vault_list_reports_no_vaults_initially() {
     let out = env.run(env.home.path(), &["vault", "list"]);
     assert_eq!(out.status.code(), Some(0));
     assert_eq!(stdout(&out), "no vaults registered\n");
+}
+
+#[test]
+fn the_registry_is_state_kept_outside_the_config_directory() {
+    let env = Env::new();
+    let notes = env.vault("notes");
+    let out = env
+        .command(env.home.path(), &["vault", "add", notes.to_str().unwrap()])
+        .env("XDG_CONFIG_HOME", env.home.path().join("config"))
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    let dir = env.home.path().join("state/notrieve");
+    let files: Vec<String> = fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(files, ["vaults.toml"]);
+    assert!(!env.home.path().join("config").exists());
 }
 
 #[test]
@@ -245,7 +264,7 @@ fn concurrent_vault_adds_from_separate_processes_all_register() {
                 .args(["vault", "add"])
                 .arg(root)
                 .env("HOME", env.home.path())
-                .env("XDG_CONFIG_HOME", env.home.path().join("config"))
+                .env("XDG_STATE_HOME", env.home.path().join("state"))
                 .env("XDG_CACHE_HOME", env.home.path().join("cache"))
                 .spawn()
                 .unwrap()

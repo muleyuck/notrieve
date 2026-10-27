@@ -31,10 +31,10 @@ impl Registry {
     }
 
     /// Serialises load, `f` and save across processes; a failing `f` leaves the file untouched.
+    /// The directory is locked, not the file: `save` replaces the file by a rename.
     pub fn update<T>(path: &Path, f: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
-        let mut lock_path = path.as_os_str().to_os_string();
-        lock_path.push(".lock");
-        let _lock = lock::lock_blocking(Path::new(&lock_path))?;
+        let dir = path.parent().unwrap_or(Path::new("."));
+        let _lock = lock::lock_directory(dir)?;
         let mut registry = Self::load(path)?;
         let out = f(&mut registry)?;
         registry.save(path)?;

@@ -224,7 +224,7 @@ fn cli_init_then_index_prints_counts_and_exits_zero() {
         std::process::Command::new(env!("CARGO_BIN_EXE_notrieve"))
             .args(args)
             .current_dir(&root)
-            .env("XDG_CONFIG_HOME", tmp.path().join("config"))
+            .env("XDG_STATE_HOME", tmp.path().join("state"))
             .output()
             .unwrap()
     };
@@ -265,7 +265,7 @@ fn cli_search_json_finds_the_note_and_reports_a_fresh_index() {
         std::process::Command::new(env!("CARGO_BIN_EXE_notrieve"))
             .args(args)
             .current_dir(&root)
-            .env("XDG_CONFIG_HOME", tmp.path().join("config"))
+            .env("XDG_STATE_HOME", tmp.path().join("state"))
             .output()
             .unwrap()
     };
@@ -299,7 +299,7 @@ fn mcp_search_over_stdio_finds_the_note_and_keeps_stdout_to_json_rpc() {
         command
             .args(args)
             .current_dir(&root)
-            .env("XDG_CONFIG_HOME", tmp.path().join("config"));
+            .env("XDG_STATE_HOME", tmp.path().join("state"));
         command
     };
     assert_eq!(command(&["init"]).output().unwrap().status.code(), Some(0));
