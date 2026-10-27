@@ -10,11 +10,57 @@ use notrieve::session::Session;
 use notrieve::{Error, RemoteErrorKind};
 use support::{
     FlakyRemote, GateEmbedder, PanicEmbedder, fake_embedder, fps, index_as_another_process,
-    index_with, indexed_paths, vault, wait_for, write,
+    index_with, indexed_paths, vault, vault_with, wait_for, write,
 };
+
+/// A vault whose index lives in `data/`, and a function that swaps `data/` for a link to a new
+/// directory outside the vault, as a sync could while a process runs. The function returns that
+/// outside directory.
+#[cfg(unix)]
+fn vault_with_a_data_dir() -> (
+    tempfile::TempDir,
+    notrieve::config::Vault,
+    impl Fn() -> std::path::PathBuf,
+) {
+    let (tmp, vault) = vault_with("db_path = \"data/index.db\"\n");
+    std::fs::create_dir_all(vault.root.join("data")).unwrap();
+    let base = tmp.path().to_path_buf();
+    let root = vault.root.clone();
+    let relink = move || {
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::rename(root.join("data"), base.join("old-data")).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("data")).unwrap();
+        outside
+    };
+    (tmp, vault, relink)
+}
 
 fn q(text: &str) -> SearchQuery {
     SearchQuery::new(text)
+}
+
+#[cfg(unix)]
+#[test]
+fn relinking_the_index_directory_while_serving_asks_for_a_restart_before_writing_there() {
+    let (_tmp, vault, relink) = vault_with_a_data_dir();
+    write(&vault, "a.md", "# A\nalpha\n");
+    let session = Session::with_embedder(vault, fake_embedder(), fps("a")).unwrap();
+    wait_for(|| {
+        session
+            .search(&q("alpha"))
+            .ok()
+            .filter(|r| r.index_state == IndexState::Fresh)
+    });
+    let outside = relink();
+    let errors = [
+        session.search(&q("alpha")).unwrap_err(),
+        session.get_note("a.md", None, None).unwrap_err(),
+    ];
+    for err in errors {
+        assert!(matches!(err, Error::FingerprintChanged), "{err}");
+    }
+    assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0);
 }
 
 #[test]

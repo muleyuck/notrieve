@@ -1,6 +1,6 @@
 //! A long-running session over one vault: the model stays loaded and a background thread keeps the
 //! index current (spec §4.6, §5.4). The MCP server calls only this API.
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -25,6 +25,8 @@ pub struct Session {
     embedder: Arc<dyn Embedder>,
     fps: Fingerprints,
     updater: Updater,
+    /// Where the index was at startup; see `Vault::ensure_index_location`.
+    index_location: PathBuf,
 }
 
 impl Session {
@@ -52,9 +54,11 @@ impl Session {
             .root
             .canonicalize()
             .map_err(|e| Error::io(&vault.root, e))?;
+        let index_location = vault.index_location();
         let updater = Updater::start(vault.clone(), Arc::clone(&embedder), fps.clone(), synced)?;
         updater.request();
         Ok(Self {
+            index_location,
             vault,
             root,
             embedder,
@@ -70,6 +74,8 @@ impl Session {
     /// Spec §5.4: light scan, signal the updater when there are changes, then search (§4.5).
     pub fn search(&self, query: &SearchQuery) -> Result<SearchResponse> {
         query.validate()?;
+        // Before `observe`, which probes the lock and so creates its file next to the index.
+        self.vault.ensure_index_location(&self.index_location)?;
         let seen = self.updater.observe()?;
         refuse_while_unusable(&seen.status)?;
         let reader = self.open_index(seen.status.synced, Store::open_reader)?;
@@ -140,6 +146,7 @@ impl Session {
     ) -> Result<NoteText> {
         // Only indexed notes: files the index leaves out (`.env`, `.git/*`, excluded or ignored
         // ones) stay unreadable. A rebuild refills the index file by file.
+        self.vault.ensure_index_location(&self.index_location)?;
         let status = self.updater.status();
         refuse_while_unusable(&status)?;
         // `Store::open` would create a missing index.

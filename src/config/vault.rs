@@ -83,7 +83,7 @@ impl Vault {
     /// Where the index is written once directory links are resolved: missing directories are
     /// created under the deepest one that exists, so that one is resolved. Recording this rather
     /// than `db_path` makes a relinked directory (a cloned repository can carry links) a change.
-    fn index_location(&self) -> PathBuf {
+    pub fn index_location(&self) -> PathBuf {
         let db = self.db_path();
         for dir in db.ancestors().skip(1) {
             if let (Ok(mut location), Ok(rest)) = (dir.canonicalize(), db.strip_prefix(dir)) {
@@ -102,6 +102,19 @@ impl Vault {
             }
         }
         db
+    }
+
+    /// For a long-running process: refuses to touch the index once its location differs from
+    /// `expected` (taken at startup, after `resolve_vault` checked it) or one of its files is a
+    /// link. A synced vault can swap a directory for a link while the process runs.
+    pub fn ensure_index_location(&self, expected: &Path) -> Result<()> {
+        if let Some(link) = self.linked_index_file() {
+            return Err(Error::IndexFileLinked(link));
+        }
+        if self.index_location() != expected {
+            return Err(Error::FingerprintChanged);
+        }
+        Ok(())
     }
 
     /// The first of the index, its lock, its embedding cache and their side files that is a

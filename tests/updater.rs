@@ -9,8 +9,57 @@ use notrieve::lock;
 use notrieve::store::Store;
 use support::{
     FlakyRemote, GateEmbedder, PanicEmbedder, fake_embedder, fps, index_as_another_process,
-    indexed_paths, vault, wait_for, write,
+    indexed_paths, vault, vault_with, wait_for, write,
 };
+
+/// A vault whose index lives in `data/`, and a function that swaps `data/` for a link to a new
+/// directory outside the vault, as a sync could while a process runs. The function returns that
+/// outside directory.
+#[cfg(unix)]
+fn vault_with_a_data_dir() -> (
+    tempfile::TempDir,
+    notrieve::config::Vault,
+    impl Fn() -> std::path::PathBuf,
+) {
+    let (tmp, vault) = vault_with("db_path = \"data/index.db\"\n");
+    std::fs::create_dir_all(vault.root.join("data")).unwrap();
+    let base = tmp.path().to_path_buf();
+    let root = vault.root.clone();
+    let relink = move || {
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::rename(root.join("data"), base.join("old-data")).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("data")).unwrap();
+        outside
+    };
+    (tmp, vault, relink)
+}
+
+#[cfg(unix)]
+#[test]
+fn observing_after_the_index_directory_was_relinked_creates_nothing_there() {
+    let (_tmp, vault, relink) = vault_with_a_data_dir();
+    let updater = Updater::start(vault, fake_embedder(), fps("a"), false).unwrap();
+    let outside = relink();
+    let err = updater.observe().unwrap_err();
+    assert!(matches!(err, notrieve::Error::FingerprintChanged), "{err}");
+    assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_run_stops_when_the_index_directory_was_relinked_since_the_start() {
+    let (_tmp, vault, relink) = vault_with_a_data_dir();
+    write(&vault, "a.md", "# A\nalpha\n");
+    let updater = Updater::start(vault.clone(), fake_embedder(), fps("a"), false).unwrap();
+    updater.request();
+    wait_for(|| Some(updater.status()).filter(|s| s.synced));
+    let outside = relink();
+    updater.request();
+    let status = wait_for(|| Some(updater.status()).filter(|s| s.stopped));
+    assert!(status.last_error.is_some());
+    assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0);
+}
 
 #[test]
 fn requested_run_indexes_the_vault_and_marks_the_index_synced() {
