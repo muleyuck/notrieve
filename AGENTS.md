@@ -1,6 +1,6 @@
 # AGENTS.md
 
-notrieve is local hybrid search (FTS5 text plus vector search, fused with reciprocal rank fusion) over a vault of Markdown notes, served over MCP to AI agents such as Claude Code and Codex. User-facing behavior is in README.md.
+notrieve is local hybrid search (FTS5 text plus vector search, fused with reciprocal rank fusion) over a vault of Markdown notes, served over MCP to AI agents such as Claude Code and Codex. User-facing behavior is in README.md, docs/usage.md and docs/configuration.md.
 
 ## Commands
 
