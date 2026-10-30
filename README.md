@@ -1,4 +1,17 @@
-# notrieve
+[![unit-test](https://github.com/muleyuck/notrieve/actions/workflows/unit-test.yml/badge.svg)](https://github.com/muleyuck/notrieve/actions/workflows/unit-test.yml)
+[![eval](https://github.com/muleyuck/notrieve/actions/workflows/eval.yml/badge.svg)](https://github.com/muleyuck/notrieve/actions/workflows/eval.yml)
+![Software License](https://img.shields.io/badge/license-MIT-brightgreen.svg?style=flat-square)
+[![Release](https://img.shields.io/github/release/muleyuck/notrieve.svg)](https://github.com/muleyuck/notrieve/releases/latest)
+
+# <img src="assets/icon.svg" width="40" height="40" alt="" align="top"> notrieve
+
+Local hybrid search over your Markdown notes, for you and for AI agents. Full-text and vector search
+run on your machine against a SQLite index, and `notrieve mcp` serves them to Claude Code, Codex
+and other MCP clients.
+
+![demo](tapes/demo.gif)
+
+The queries share almost no words with the notes they find.
 
 ## Install
 
@@ -23,6 +36,38 @@ unpack it and put `notrieve` on your `PATH`. Targets: `aarch64-apple-darwin`,
 - macOS 13.4 or later on Apple Silicon. Intel Macs are not supported.
 - Linux x86_64 or aarch64 with glibc 2.38 or later and `GLIBCXX_3.4.31` or later (Ubuntu 24.04 or
   later). Ubuntu 22.04 does not work.
+
+## Quick start
+
+```sh
+cd ~/notes
+notrieve init          # writes .notrieve/, registers the vault, downloads the model, builds the index
+notrieve search "バックアップについて書いたこと"
+```
+
+`notrieve search` first indexes notes changed since the last run, for about `search_budget_ms` (2
+seconds by default), then prints the matching chunks with their path, line range and heading path.
+Notes it did not get to, or all of them while another process is indexing, are searched as last
+indexed. `-k` sets the number of results (default 8), `--tag` keeps notes with that tag or one of
+its child tags (repeat it to require several), `--path` keeps notes whose vault-relative path starts
+with the given text, and `--json` prints JSON. Run it anywhere inside the vault, or pass `--vault
+<name>`. `notrieve index` updates the index without searching.
+
+The built-in model, ruri-v3-30m, is a Japanese embedding model. Full-text matching works for any
+language, but for notes mostly in another language, set up [another local
+model](#using-another-local-model) or [an API](#embedding-through-an-api-instead-of-a-local-model)
+for the semantic half.
+
+`notrieve vault list` shows the registered vaults, `notrieve vault add <dir>` registers a
+directory that already has `.notrieve/` (a cloned or synced vault), and `notrieve vault remove
+<name>` unregisters one and keeps its files.
+
+## What gets indexed
+
+Every `*.md` file under the vault, except hidden files and directories, files ignored by
+`.gitignore` or `.ignore` (whether or not the vault is a git repository), and files matching
+`exclude` in `.notrieve/config.toml`. Notes are split into chunks at headings, and long sections by size. Tags come from the
+frontmatter `tags` property and from inline `#tags`, following Obsidian's tag rules.
 
 ## Use from AI agents (MCP)
 
@@ -49,6 +94,30 @@ args = ["mcp", "--vault", "<name>"]
 
 The server serves one vault. Register one server per vault (`notrieve vault list` shows the names).
 Without `--vault` it uses the vault containing the working directory, then the default vault.
+
+The server offers two tools:
+
+- `search`: hybrid search with `query`, and optionally `k`, `tags` and `path_prefix`. Results
+  carry the path, line range, heading path and text of each chunk.
+- `get_note`: reads the note at `path` (as `search` returns it), whole or from `start_line` to
+  `end_line`, to see the context around a hit. It never reads outside the vault.
+
+When a search finds notes changed since they were indexed, it answers from the index as it is,
+counts them in `stale_files`, and asks a background thread to index them for later searches.
+
+## Configuration
+
+`.notrieve/config.toml` in the vault root. Every key has a default, except that an API model
+needs `chunk_max_tokens`:
+
+| Key | Default | Meaning |
+|---|---|---|
+| `model` | `"ruri-v3-30m"` | The embedding model: the built-in preset, or a `[model]` table (below). |
+| `exclude` | `[]` | Gitignore-style patterns, relative to the vault root, for notes not to index. |
+| `db_path` | `".notrieve/index.db"` | The index file, relative to the vault root unless absolute. |
+| `search_budget_ms` | `2000` | About how long `notrieve search` spends indexing changed notes before it searches. With the local model, a note already started is finished, so it can run over. |
+| `chunk_max_tokens` | `450` | Chunk size in tokens. Required for an API model, where it counts characters. |
+| `index_threads` | `0` | Threads for the local model; `0` uses half the CPU cores. |
 
 ## Using another local model
 
@@ -152,3 +221,14 @@ responses carry `indexer_error: "the background indexer paused for <delay>: <rea
 Stored vectors are reused across `notrieve index --rebuild`. After moving to another server or a
 different precision of the same model, set a new `id` under `[model]` to compute every vector
 again.
+
+## Where notrieve keeps its data
+
+| What | Where |
+|---|---|
+| Settings | `<vault>/.notrieve/config.toml` |
+| Index and its embedding cache | `<vault>/.notrieve/index.db` and `index.db.embeddings.db` (or `db_path` and the same name with `.embeddings.db` added). The `.notrieve/.gitignore` that `init` writes covers files inside `.notrieve/`; ignore a `db_path` elsewhere yourself. |
+| Downloaded models | `$XDG_CACHE_HOME/notrieve/models` (default `~/.cache/notrieve/models`) |
+| Registered vaults and approvals | `$XDG_STATE_HOME/notrieve/vaults.toml` (default `~/.local/state/notrieve/vaults.toml`) |
+
+To uninstall, remove the binary and these directories. Your notes are never modified.
