@@ -11,7 +11,7 @@ publish = false
 [dependencies]
 anyhow = "1"
 blake3 = "1.8"
-fastembed = { version = "=7.1.1", default-features = false, features = ["ort-download-binaries-rustls-tls"] }
+fastembed = { version = "=7.5.0", default-features = false, features = ["ort-download-binaries-rustls-tls"] }
 clap = { version = "4.6", features = ["derive"] }
 ignore = "0.4"
 libc = "0.2"
