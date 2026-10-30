@@ -1,4 +1,17 @@
-# notrieve
+[![unit-test](https://github.com/muleyuck/notrieve/actions/workflows/unit-test.yml/badge.svg)](https://github.com/muleyuck/notrieve/actions/workflows/unit-test.yml)
+[![eval](https://github.com/muleyuck/notrieve/actions/workflows/eval.yml/badge.svg)](https://github.com/muleyuck/notrieve/actions/workflows/eval.yml)
+![Software License](https://img.shields.io/badge/license-MIT-brightgreen.svg?style=flat-square)
+[![Release](https://img.shields.io/github/release/muleyuck/notrieve.svg)](https://github.com/muleyuck/notrieve/releases/latest)
+
+# <img src="assets/icon.svg" width="40" height="40" alt="" align="top"> notrieve
+
+Local hybrid search over your Markdown notes, for you and for AI agents. Full-text and vector search
+run on your machine against a SQLite index, and `notrieve mcp` serves them to Claude Code, Codex
+and other MCP clients.
+
+![demo](tapes/demo.gif)
+
+The queries share almost no words with the notes they find.
 
 ## Install
 
