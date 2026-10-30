@@ -22,9 +22,9 @@ jobs:
       fail-fast: true
       matrix:
         include:
-          - runner: macos-14
+          - runner: macos-15
             target: aarch64-apple-darwin
-            # cc compiles C dependencies for the SDK's version (14.5 on macos-14) unless this is
+            # cc compiles C dependencies for the runner SDK's macOS version unless this is
             # set; 13.4 is what the bundled ONNX Runtime is built for.
             macos_deployment_target: "13.4"
           - runner: ubuntu-24.04-arm
