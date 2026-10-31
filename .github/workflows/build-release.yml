@@ -22,8 +22,11 @@ jobs:
       fail-fast: true
       matrix:
         include:
-          - runner: macos-14
+          - runner: macos-15
             target: aarch64-apple-darwin
+            # cc compiles C dependencies for the runner SDK's macOS version unless this is
+            # set; 13.4 is what the bundled ONNX Runtime is built for.
+            macos_deployment_target: "13.4"
           - runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
           - runner: ubuntu-24.04
@@ -34,6 +37,7 @@ jobs:
       contents: read
     env:
       TARGET: ${{ matrix.target }}
+      MACOSX_DEPLOYMENT_TARGET: ${{ matrix.macos_deployment_target }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -42,13 +46,16 @@ jobs:
 
       - uses: muleyuck/github-actions/actions/rust/setup@v1
 
+      # Built outside target/: the setup action restores target/ from a cache keyed only on the OS
+      # and Cargo.lock, and a build script that ignores MACOSX_DEPLOYMENT_TARGET (blake3) would
+      # keep C objects compiled for another runner's macOS.
       - name: Build
         run: |
           rustup target add "$TARGET"
-          cargo build --profile dist --locked --target "$TARGET"
+          cargo build --profile dist --locked --target "$TARGET" --target-dir release-target
 
       - name: Package
-        run: scripts/package.sh "$TARGET" "target/$TARGET/dist/notrieve" dist
+        run: scripts/package.sh "$TARGET" "release-target/$TARGET/dist/notrieve" dist
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
