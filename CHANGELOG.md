@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.1](https://github.com/muleyuck/notrieve/compare/v0.1.0...v0.1.1) (2026-10-31)
+
+
+### Bug Fixes
+
+* **build:** build the macOS release for macOS 13.4 ([#30](https://github.com/muleyuck/notrieve/issues/30)) ([90d414e](https://github.com/muleyuck/notrieve/commit/90d414e993b721758a88eed7c08b62ae0e819747))
+
 ## 0.1.0 (2026-10-30)
 
 
