@@ -308,6 +308,8 @@ fn query_ids(conn: &Connection, sql: &str, params: Vec<Value>) -> Result<Vec<i64
 }
 
 /// BM25 order for long terms, then LIKE matches of short terms not already listed (spec §4.5 step 2).
+/// LIKE matches are ranked by how many short terms they contain, then by how often, so the 50
+/// taken are not just the earliest indexed.
 fn fts_ranking(conn: &Connection, text: &str, filter: &Filter) -> Result<Vec<i64>> {
     let (long, short) = split_terms(text);
     let mut ranked: Vec<i64> = Vec::new();
@@ -336,15 +338,36 @@ fn fts_ranking(conn: &Connection, text: &str, filter: &Filter) -> Result<Vec<i64
                 params.push(Value::Text(pattern.clone()));
             }
         }
+        // LIKE folds ASCII case only, and so do SQLite's lower() and `to_ascii_lowercase`. A term
+        // has no whitespace, so it cannot match across the newlines joining the columns.
+        let mut matched = Vec::new();
+        let mut occurrences = Vec::new();
+        let mut matched_params = Vec::new();
+        let mut occurrence_params = Vec::new();
+        for term in &short {
+            let term = Value::Text(term.to_ascii_lowercase());
+            matched.push("(instr(doc, ?) > 0)");
+            occurrences.push("(length(doc) - length(replace(doc, ?, ''))) / length(?)");
+            matched_params.push(term.clone());
+            occurrence_params.extend([term.clone(), term]);
+        }
         let sql = format!(
-            "SELECT c.id FROM chunks_fts JOIN chunks c ON c.id = chunks_fts.rowid
-             JOIN files f ON f.id = c.file_id
-             WHERE ({}) AND {}
-             ORDER BY c.id LIMIT {CANDIDATES}",
+            "SELECT id FROM (
+               SELECT c.id AS id,
+                 lower(chunks_fts.title || char(10) || chunks_fts.heading_path || char(10)
+                       || chunks_fts.body) AS doc
+               FROM chunks_fts JOIN chunks c ON c.id = chunks_fts.rowid
+               JOIN files f ON f.id = c.file_id
+               WHERE ({}) AND {})
+             ORDER BY {} DESC, {} DESC, id LIMIT {CANDIDATES}",
             conditions.join(" OR "),
-            filter.sql
+            filter.sql,
+            matched.join(" + "),
+            occurrences.join(" + "),
         );
         params.extend(filter.params.iter().cloned());
+        params.extend(matched_params);
+        params.extend(occurrence_params);
         for id in query_ids(conn, &sql, params)? {
             if !ranked.contains(&id) {
                 ranked.push(id);
