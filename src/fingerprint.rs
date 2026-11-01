@@ -76,7 +76,7 @@ pub fn index_fingerprint(model_fingerprint: &str, chunk_max_tokens: usize) -> St
 }
 
 /// Content hash cached next to the file, keyed by size and mtime, so large ONNX files are hashed once.
-fn file_hash(path: &Path) -> Result<String> {
+pub(crate) fn file_hash(path: &Path) -> Result<String> {
     let meta = fs::metadata(path).map_err(|e| Error::io(path, e))?;
     let mtime = meta
         .modified()
@@ -130,8 +130,8 @@ fn sidecar(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{HfPin, ModelSource, Pooling};
     use crate::config::{ModelContract, OnnxContract, RemoteContract, VaultConfig};
-    use crate::config::{ModelSource, Pooling};
     use serde_json::{Map, json};
     use std::fs;
     use tempfile::TempDir;
@@ -265,8 +265,13 @@ mod tests {
     fn a_local_contract_keeps_the_fingerprint_it_had_before_remote_models() {
         let dir = TempDir::new().unwrap();
         let c = OnnxContract {
+            // A pin stays out of the fingerprint.
             source: ModelSource::Hf {
                 repo: "owner/repo".into(),
+                pin: Some(HfPin {
+                    revision: "0123abc",
+                    files: &[("config.json", "00")],
+                }),
             },
             ..model(dir.path())
         };

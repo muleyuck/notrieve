@@ -50,9 +50,63 @@ pub enum Pooling {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ModelSource {
-    Hf { repo: String },
-    Path { dir: PathBuf },
+    Hf {
+        repo: String,
+        /// Left out of the contract's serialization: the model fingerprint already hashes the
+        /// files, and existing indexes must keep their fingerprint.
+        #[serde(skip)]
+        pin: Option<HfPin>,
+    },
+    Path {
+        dir: PathBuf,
+    },
 }
+
+/// A Hugging Face revision and the blake3 hash of every file the model needs from it. Without
+/// one, files come from `main` unchecked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HfPin {
+    pub revision: &'static str,
+    /// (file, blake3 hex)
+    pub files: &'static [(&'static str, &'static str)],
+}
+
+impl HfPin {
+    pub fn blake3_of(&self, file: &str) -> Option<&'static str> {
+        self.files
+            .iter()
+            .find(|(name, _)| *name == file)
+            .map(|(_, hash)| *hash)
+    }
+}
+
+/// The preset's repository is a third party's ONNX export; pinning it gives every install the
+/// files `tests/fixtures/reference-ruri-v3-30m.json` was made from.
+const RURI_V3_30M_PIN: HfPin = HfPin {
+    revision: "cdf9391f1ff2198daa8f63f7ccf97d7b3e7415a0",
+    files: &[
+        (
+            "tokenizer.json",
+            "034e81028e423778e1478243cea3aaed6ec2466c10712076a1638bff5394f94a",
+        ),
+        (
+            "config.json",
+            "54e86200721680234755432f373b6444dde63363d8faa838edc4e90696a99f5c",
+        ),
+        (
+            "special_tokens_map.json",
+            "b4f05e05036397e568ab595200a693945fd5706de3fbf2978e90b9d6803185cb",
+        ),
+        (
+            "tokenizer_config.json",
+            "c742defeb68d070f0fedaa0cf4f8822b17cd5220628f28764bcc6f91d72d39ab",
+        ),
+        (
+            "onnx/model.onnx",
+            "08b5a5c40f169e16bec650c5a5d320e762b9992dcc6dfcc173d5f8daf919a297",
+        ),
+    ],
+};
 
 /// A model run here with ONNX Runtime. It serializes exactly as the contract did before remote
 /// models existed, so the model fingerprints of existing indexes do not change.
@@ -122,6 +176,7 @@ fn ruri_v3_30m() -> OnnxContract {
         id: PRESET_RURI_V3_30M.to_string(),
         source: ModelSource::Hf {
             repo: "sirasagi62/ruri-v3-30m-ONNX".to_string(),
+            pin: Some(RURI_V3_30M_PIN),
         },
         onnx_file: "onnx/model.onnx".to_string(),
         dim: 256,
@@ -326,6 +381,7 @@ fn parse_source(source: &str, vault_root: &Path) -> Result<ModelSource> {
         if parts.len() == 2 && parts.iter().all(|p| valid_repo_part(p)) {
             return Ok(ModelSource::Hf {
                 repo: repo.to_string(),
+                pin: None,
             });
         }
     } else if let Some(dir) = source.strip_prefix("path:") {
@@ -418,7 +474,8 @@ mod tests {
         assert_eq!(
             c.source,
             ModelSource::Hf {
-                repo: "sirasagi62/ruri-v3-30m-ONNX".into()
+                repo: "sirasagi62/ruri-v3-30m-ONNX".into(),
+                pin: Some(RURI_V3_30M_PIN),
             }
         );
         assert_eq!(c.onnx_file, "onnx/model.onnx");
@@ -448,7 +505,8 @@ mod tests {
         assert_eq!(
             c.source,
             ModelSource::Hf {
-                repo: "owner/repo".into()
+                repo: "owner/repo".into(),
+                pin: None,
             }
         );
     }

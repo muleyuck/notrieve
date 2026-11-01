@@ -23,6 +23,8 @@ from huggingface_hub import hf_hub_download
 from transformers import AutoTokenizer
 
 REPO = "sirasagi62/ruri-v3-30m-ONNX"
+# The revision the preset pins (src/config/model.rs).
+REVISION = "cdf9391f1ff2198daa8f63f7ccf97d7b3e7415a0"
 ONNX_FILE = "onnx/model.onnx"
 FILES = [
     "tokenizer.json",
@@ -67,7 +69,7 @@ def embed(sess, tok, text: str) -> list[float]:
 
 
 def main() -> None:
-    paths = {name: Path(hf_hub_download(REPO, name)) for name in FILES}
+    paths = {name: Path(hf_hub_download(REPO, name, revision=REVISION)) for name in FILES}
     model_dir = paths["tokenizer.json"].parent
 
     tok = AutoTokenizer.from_pretrained(model_dir)

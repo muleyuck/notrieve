@@ -52,7 +52,7 @@ uv run --script scripts/reference.py   # regenerate tests/fixtures/reference-rur
 | `NOTRIEVE_TEST_TEI_SOURCE` | `tests/real_remote.rs` against Text Embeddings Inference serving `cl-nagoya/ruri-v3-30m` (with `NOTRIEVE_TEST_MODEL=1`). |
 
   Example: `NOTRIEVE_TEST_MODEL=1 cargo test --locked --test reference_vectors --test real_model --test eval -- --nocapture`.
-- **Reference fixture**: `tests/fixtures/reference-ruri-v3-30m.json` holds Python (onnxruntime) vectors for the preset, plus the inputs they came from (`files`: model file hashes, prefixes, max tokens). `tests/reference_vectors.rs` compares the Rust embeddings with it. Regenerate it with `uv run --script scripts/reference.py` when the preset changes or the check fails with `fixture is stale: ...`, then run the gated test again. The CI model cache is keyed on this file.
+- **Reference fixture**: `tests/fixtures/reference-ruri-v3-30m.json` holds Python (onnxruntime) vectors for the preset, plus the inputs they came from (`files`: model file hashes, prefixes, max tokens). `tests/reference_vectors.rs` compares the Rust embeddings with it. Regenerate it with `uv run --script scripts/reference.py` when the preset changes or the check fails with `fixture is stale: ...`, then run the gated test again. The preset downloads from a pinned Hugging Face revision and checks each file's blake3 (`RURI_V3_30M_PIN` in `src/config/model.rs`); moving it means updating that pin and `REVISION` in `scripts/reference.py` together, and `the_preset_pin_holds_the_fixture_file_hashes` checks the pin against the fixture. The CI model cache is keyed on this file.
 - `tests/eval/` (`queries.toml` and a sample vault) feeds the search-quality test in `tests/eval.rs`.
 
 ## Commits and releases
