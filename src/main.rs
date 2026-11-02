@@ -255,15 +255,28 @@ fn run(cli: Cli) -> Result<()> {
         }
         Command::Mcp { vault } => {
             // stdout carries the protocol; progress and errors go to stderr (spec §6).
-            let server = match app::open_vault(vault.vault.as_deref(), &cwd, &paths)
-                .and_then(|vault| Session::start(vault, &paths, &mut print_event))
-            {
-                Ok(session) => NotrieveServer::new(Arc::new(session)),
-                Err(e) => {
-                    eprintln!("error: {e}");
-                    NotrieveServer::unavailable(e.to_string())
-                }
-            };
+            // The handshake is served while the session starts, which may download the model.
+            let server = NotrieveServer::starting(mcp::START_WAIT);
+            let starter = server.clone();
+            let spawned = std::thread::Builder::new()
+                .name("notrieve-start".into())
+                .spawn(move || {
+                    let started = std::panic::catch_unwind(|| {
+                        app::open_vault(vault.vault.as_deref(), &cwd, &paths)
+                            .and_then(|vault| Session::start(vault, &paths, &mut print_event))
+                    });
+                    starter.started(match started {
+                        Ok(Ok(session)) => Ok(Arc::new(session)),
+                        Ok(Err(e)) => {
+                            eprintln!("error: {e}");
+                            Err(e.to_string())
+                        }
+                        Err(_) => Err("notrieve panicked while starting".to_string()),
+                    });
+                });
+            if let Err(e) = spawned {
+                server.started(Err(format!("cannot start the session: {e}")));
+            }
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()

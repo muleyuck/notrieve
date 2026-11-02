@@ -1,6 +1,7 @@
 //! MCP server over stdio (spec §4.6, §5.4). It calls only the `session` API; stdout carries the
 //! protocol and nothing else.
-use std::sync::Arc;
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::Duration;
 
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, ContentBlock};
@@ -34,24 +35,80 @@ pub struct GetNoteParams {
     pub end_line: Option<usize>,
 }
 
+type Started = std::result::Result<Arc<Session>, String>;
+
+/// How long `notrieve mcp` lets a tool call wait for the session to start. Loading a downloaded
+/// model takes about a second; a download takes longer and answers "still starting" (a guess,
+/// below the per-call timeouts of MCP clients; not measured).
+pub const START_WAIT: Duration = Duration::from_secs(30);
+
+/// Clones share the session.
 #[derive(Clone)]
 pub struct NotrieveServer {
-    /// `Err` holds why the session could not start; every tool then returns it (spec §6).
-    session: std::result::Result<Arc<Session>, String>,
+    start: Arc<Start>,
+}
+
+struct Start {
+    /// Unset while the session starts. `Err` holds why it could not start; every tool then
+    /// returns it (spec §6).
+    session: Mutex<Option<Started>>,
+    ready: Condvar,
+    wait: Duration,
+}
+
+impl Start {
+    /// The session, once started within `wait`.
+    fn wait(&self) -> Started {
+        let guard = self.session.lock().unwrap_or_else(|e| e.into_inner());
+        let (guard, _) = self
+            .ready
+            .wait_timeout_while(guard, self.wait, |session| session.is_none())
+            .unwrap_or_else(|e| e.into_inner());
+        guard.clone().unwrap_or_else(|| {
+            Err(
+                "notrieve is still starting (loading the embedding model); try again shortly"
+                    .to_string(),
+            )
+        })
+    }
 }
 
 #[tool_router]
 impl NotrieveServer {
     pub fn new(session: Arc<Session>) -> Self {
-        Self {
-            session: Ok(session),
-        }
+        Self::with(Ok(session))
     }
 
     pub fn unavailable(reason: String) -> Self {
+        Self::with(Err(reason))
+    }
+
+    /// A server that can answer the MCP handshake before `started` is called. Loading the model
+    /// can mean a download, longer than a client waits for the handshake. A tool call waits up to
+    /// `wait` for the session.
+    pub fn starting(wait: Duration) -> Self {
         Self {
-            session: Err(reason),
+            start: Arc::new(Start {
+                session: Mutex::new(None),
+                ready: Condvar::new(),
+                wait,
+            }),
         }
+    }
+
+    /// Ends the start of a server made by `starting`; later calls are ignored.
+    pub fn started(&self, session: Started) {
+        let mut current = self.start.session.lock().unwrap_or_else(|e| e.into_inner());
+        if current.is_none() {
+            *current = Some(session);
+            self.start.ready.notify_all();
+        }
+    }
+
+    fn with(session: Started) -> Self {
+        let server = Self::starting(Duration::ZERO);
+        server.started(session);
+        server
     }
 
     #[tool(
@@ -84,16 +141,17 @@ impl NotrieveServer {
         T: Serialize + Send + 'static,
         F: FnOnce(&Session) -> crate::Result<T> + Send + 'static,
     {
-        let session = match &self.session {
-            Ok(session) => Arc::clone(session),
-            Err(reason) => return tool_error(reason.clone()),
-        };
-        match tokio::task::spawn_blocking(move || work(&session)).await {
-            Ok(Ok(value)) => match serde_json::to_string_pretty(&value) {
+        let start = Arc::clone(&self.start);
+        // Waiting for the start blocks too, so it shares the blocking task with the work.
+        let outcome =
+            tokio::task::spawn_blocking(move || start.wait().map(|session| work(&session)));
+        match outcome.await {
+            Ok(Ok(Ok(value))) => match serde_json::to_string_pretty(&value) {
                 Ok(json) => CallToolResult::success(vec![ContentBlock::text(json)]),
                 Err(e) => tool_error(format!("internal error: {e}")),
             },
-            Ok(Err(e)) => tool_error(error_text(&e)),
+            Ok(Ok(Err(e))) => tool_error(error_text(&e)),
+            Ok(Err(reason)) => tool_error(reason),
             Err(e) => tool_error(format!("internal error: {e}")),
         }
     }

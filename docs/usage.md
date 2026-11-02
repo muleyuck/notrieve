@@ -60,6 +60,9 @@ vault (the first one registered, or the one given `--default`).
 
 `notrieve mcp` is a stdio MCP server, so any client that can launch one can use it. Run
 `notrieve init` first, so the server starts with the model downloaded and the index built.
+The server answers the client at once and loads the model in the background. A tool call made
+meanwhile waits for it, up to 30 seconds; when the model still has to be downloaded, the tools
+answer that notrieve is still starting until it is ready.
 
 - One server serves one vault. Register one server per vault.
 - Claude Code: `--scope user` makes the notes searchable from every project. Without it, the

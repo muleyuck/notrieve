@@ -1,6 +1,7 @@
 mod support;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use notrieve::embed::Embedder;
 use notrieve::mcp::NotrieveServer;
@@ -175,6 +176,46 @@ async fn a_server_that_could_not_start_answers_every_tool_with_the_reason() {
         assert_eq!(result.is_error, Some(true), "{name}");
         assert_eq!(text(&result), reason, "{name}");
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_starting_server_answers_before_its_session_is_ready() {
+    let (_tmp, session) = synced_session(&[("a.md", "# A\nalpha\n")]);
+    let server = NotrieveServer::starting(Duration::from_millis(50));
+    // The handshake completes with no session yet.
+    let client = connect(server.clone()).await;
+    let early = call(&client, "search", json!({"query": "alpha"})).await;
+    assert_eq!(early.is_error, Some(true));
+    assert!(text(&early).contains("still starting"), "{}", text(&early));
+    server.started(Ok(session));
+    let ready = call(&client, "search", json!({"query": "alpha"})).await;
+    assert_eq!(ready.is_error, Some(false), "{}", text(&ready));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_call_made_while_starting_waits_for_the_session() {
+    let (_tmp, session) = synced_session(&[("a.md", "# A\nalpha\n")]);
+    let server = NotrieveServer::starting(Duration::from_secs(30));
+    let client = connect(server.clone()).await;
+    let starter = server.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(200));
+        starter.started(Ok(session));
+    });
+    let result = call(&client, "search", json!({"query": "alpha"})).await;
+    assert_eq!(result.is_error, Some(false), "{}", text(&result));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_session_that_fails_to_start_later_is_reported_by_every_tool() {
+    let server = NotrieveServer::starting(Duration::from_millis(50));
+    let client = connect(server.clone()).await;
+    server.started(Err("the model could not be downloaded".into()));
+    let result = call(&client, "get_note", json!({"path": "a.md"})).await;
+    assert_eq!(
+        (result.is_error, text(&result)),
+        (Some(true), "the model could not be downloaded".to_string())
+    );
 }
 
 /// Ten notes that all match "alpha", so the result count shows the k in effect.
