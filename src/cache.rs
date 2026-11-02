@@ -100,6 +100,10 @@ impl EmbeddingCache {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .map_err(|e| classify(e, path))?;
+        // Before anything is written or discarded, including the switch to WAL.
+        if !is_cache_file(&conn, version).map_err(|e| classify(e, path))? {
+            return Err(Error::ForeignDatabase(path.to_path_buf()));
+        }
         if version != 0 && version != CACHE_SCHEMA_VERSION {
             drop(conn);
             discard(path)?;
@@ -190,6 +194,24 @@ impl EmbeddingCache {
     pub fn conn(&self) -> &Connection {
         &self.conn
     }
+}
+
+/// Whether the database is a cache notrieve created (`meta.cache_id`, written in the transaction that
+/// sets its user_version) or an empty file to create one in. Anything else is another program's,
+/// which must be neither written nor discarded. A read error is returned, so that an unreadable
+/// file still reaches the discard of `open`.
+fn is_cache_file(conn: &Connection, version: i64) -> rusqlite::Result<bool> {
+    if version == 0 {
+        let objects: i64 =
+            conn.query_row("SELECT count(*) FROM sqlite_master", [], |r| r.get(0))?;
+        return Ok(objects == 0);
+    }
+    let columns: i64 = conn.query_row(
+        "SELECT count(*) FROM pragma_table_info('meta') WHERE name IN ('key', 'value')",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(columns == 2 && read_cache_id(conn, "meta")?.is_some())
 }
 
 /// Removes the cache and its WAL files; the cache is derived data, so nothing is kept.
@@ -351,6 +373,47 @@ mod tests {
         let cache = EmbeddingCache::open(&path).unwrap();
         assert!(cache.is_new());
         assert_eq!(cache.entry_count().unwrap(), 0);
+    }
+
+    #[test]
+    fn another_programs_database_is_refused_and_left_untouched() {
+        let dir = TempDir::new().unwrap();
+        // With a user_version of its own (another schema version would be discarded), and
+        // without one (a new cache would be created in it).
+        for (i, version) in [7, 0].into_iter().enumerate() {
+            let path = dir.path().join(format!("app{i}.embeddings.db"));
+            Connection::open(&path)
+                .unwrap()
+                .execute_batch(&format!(
+                    "CREATE TABLE notes(x TEXT); INSERT INTO notes VALUES ('keep');
+                     PRAGMA user_version = {version};"
+                ))
+                .unwrap();
+            for result in [
+                EmbeddingCache::open(&path),
+                EmbeddingCache::open_for_rebuild(&path),
+            ] {
+                assert!(
+                    matches!(result, Err(Error::ForeignDatabase(_))),
+                    "{version}"
+                );
+            }
+            let conn = Connection::open(&path).unwrap();
+            let kept: String = conn
+                .query_row("SELECT x FROM notes", [], |r| r.get(0))
+                .unwrap();
+            let (tables, journal): (i64, String) = (
+                conn.query_row("SELECT count(*) FROM sqlite_master", [], |r| r.get(0))
+                    .unwrap(),
+                conn.query_row("PRAGMA journal_mode", [], |r| r.get(0))
+                    .unwrap(),
+            );
+            assert_eq!(
+                (kept.as_str(), tables, journal.as_str()),
+                ("keep", 1, "delete"),
+                "{version}"
+            );
+        }
     }
 
     #[test]
