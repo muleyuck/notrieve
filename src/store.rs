@@ -462,7 +462,6 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    /// Keys of every chunk's vector in the embedding cache.
     /// The embedding key of one chunk, to read the index's vector dimension from the cache.
     pub fn any_embedding_key(&self) -> Result<Option<EmbeddingKey>> {
         if !self.has_table("chunks")? {
@@ -474,6 +473,7 @@ impl Store {
             .optional()?)
     }
 
+    /// Keys of every chunk's vector in the embedding cache.
     pub fn embedding_keys(&self) -> Result<HashSet<EmbeddingKey>> {
         if !self.has_table("chunks")? {
             return Ok(HashSet::new());

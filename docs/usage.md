@@ -48,7 +48,8 @@ vault (the first one registered, or the one given `--default`).
 
 ## What gets indexed
 
-- Every `*.md` file under the vault, except:
+- Every `*.md` file under the vault (the extension in lower case: `.MD` and `.markdown` files are
+  not indexed), except:
   - hidden files and directories,
   - files ignored by `.gitignore` or `.ignore` (whether or not the vault is a git repository),
   - files matching `exclude` in `.notrieve/config.toml`.
