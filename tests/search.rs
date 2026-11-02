@@ -164,6 +164,32 @@ fn like_matches_are_appended_after_the_fts_ranking_without_duplicates() {
     assert_eq!(rank("none.md"), [None]);
 }
 
+#[test]
+fn like_matches_rank_by_terms_matched_then_by_occurrences() {
+    let f = Fixture::new();
+    // Indexed first (the scan is sorted by path), so chunk id order alone would put them first.
+    for i in 0..60 {
+        f.write(&format!("a{i:03}.md"), "税金の話。\n");
+    }
+    f.write("x-many.md", "税金、税金、税金の話。\n");
+    f.write("y-both.md", "税金と控除の話。\n");
+    f.write("z-upper.md", "TX tx Tx の話。\n");
+    f.index();
+    // With k = 50, every text candidate that only the vector side could outscore is returned.
+    let ranked = |text: &str| -> Vec<String> {
+        let q = SearchQuery {
+            k: MAX_K,
+            ..SearchQuery::new(text)
+        };
+        fts_paths(&f.search(&q).unwrap())
+    };
+    // 61st by chunk id; it would not even be among the 50 candidates.
+    assert_eq!(ranked("税金")[0], "x-many.md");
+    assert_eq!(ranked("税金 控除")[0], "y-both.md");
+    // Counted ignoring ASCII case, like LIKE matches.
+    assert_eq!(ranked("tx")[0], "z-upper.md");
+}
+
 /// Gives documents containing `marker` the vector opposite to `query`'s, so they rank last by
 /// cosine distance; every other document keeps its fake vector.
 struct OppositeEmbedder {
@@ -241,8 +267,8 @@ fn tag_filter_restricts_candidates_before_the_top_fifty_are_taken() {
         ("tagged.md", Some(1), Some(1))
     );
     assert_eq!(hits[0].tags, ["work/proj"]);
-    // A two-character term goes through LIKE, whose candidates are taken in chunk id order: the
-    // tagged note was indexed last (the scan is sorted by path), 121st of 121.
+    // A two-character term goes through LIKE. Every note has it once, so the tie goes to chunk id
+    // order: the tagged note was indexed last (the scan is sorted by path), 121st of 121.
     let short = SearchQuery {
         k: MAX_K,
         ..SearchQuery::new("語句")
