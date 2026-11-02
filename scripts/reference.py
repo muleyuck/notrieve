@@ -88,6 +88,7 @@ def main() -> None:
 
     fixture = {
         "repo": REPO,
+        "revision": REVISION,
         "onnx_file": ONNX_FILE,
         "files": [
             {"blake3": blake3(paths[name].read_bytes()).hexdigest(), "name": name}

@@ -1,0 +1,38 @@
+name: model-upstream
+# Fails, so GitHub sends its failure notice, when the files the preset model uses change upstream.
+# The preset stays pinned; moving it is a manual change (AGENTS.md, "Reference fixture").
+on:
+  schedule:
+    - cron: "0 0 * * 1"
+  workflow_dispatch:
+permissions: {}
+jobs:
+  check:
+    permissions:
+      contents: read
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Compare the pinned files with main of the upstream repository
+        shell: bash
+        run: |
+          fixture=tests/fixtures/reference-ruri-v3-30m.json
+          repo=$(jq -er .repo "$fixture")
+          paths=$(jq -er '[.files[].name | "paths=" + @uri] | join("&")' "$fixture")
+          # git blob id, plus the LFS sha256 of large files, of each file the preset uses.
+          files() {
+            curl -fsS -X POST "https://huggingface.co/api/models/$repo/paths-info/$1" --data "$paths" |
+              jq -eS '[.[] | {path, oid, lfs: .lfs.oid}] | if length == 0 then error("no files") else sort_by(.path) end'
+          }
+          pinned=$(files "$(jq -er .revision "$fixture")")
+          latest=$(files main)
+          if [ "$pinned" != "$latest" ]; then
+            echo "::error::the files the preset uses changed on main of $repo; see AGENTS.md (Reference fixture) to move the pin"
+            printf 'pinned:\n%s\nmain:\n%s\n' "$pinned" "$latest"
+            exit 1
+          fi
+          echo "unchanged: main of $repo has the pinned files"

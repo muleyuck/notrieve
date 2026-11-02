@@ -17,6 +17,7 @@ const MIN_COSINE: f32 = 0.9999;
 #[derive(Debug, Clone, Deserialize)]
 struct Fixture {
     repo: String,
+    revision: String,
     onnx_file: String,
     files: Vec<FileHash>,
     query_prefix: String,
@@ -115,6 +116,7 @@ fn matching_fixture() -> (Fixture, OnnxContract, tempfile::TempDir) {
     };
     let fixture = Fixture {
         repo: repo.clone(),
+        revision: String::new(),
         onnx_file: contract.onnx_file.clone(),
         files,
         query_prefix: contract.query_prefix.clone(),
@@ -179,13 +181,18 @@ fn stale_fields_names_a_file_recorded_twice() {
     );
 }
 
-/// The preset downloads exactly the files the fixture was made from.
+/// The preset downloads exactly the files the fixture was made from. The revision is also read by
+/// `.github/workflows/model-upstream.yml`.
 #[test]
-fn the_preset_pin_holds_the_fixture_file_hashes() {
+fn the_preset_pin_holds_the_fixture_revision_and_file_hashes() {
     let fixture: Fixture = serde_json::from_str(FIXTURE).unwrap();
     let ModelSource::Hf { pin: Some(pin), .. } = preset_contract().source else {
         panic!("the preset is a pinned HF model");
     };
+    assert_eq!(
+        pin.revision, fixture.revision,
+        "update the preset pin in src/config/model.rs along with the fixture"
+    );
     let mut pinned: Vec<(String, String)> = pin
         .files
         .iter()
