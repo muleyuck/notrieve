@@ -17,6 +17,7 @@ const MIN_COSINE: f32 = 0.9999;
 #[derive(Debug, Clone, Deserialize)]
 struct Fixture {
     repo: String,
+    revision: String,
     onnx_file: String,
     files: Vec<FileHash>,
     query_prefix: String,
@@ -50,7 +51,7 @@ fn preset_contract() -> OnnxContract {
 
 /// Names of the fixture fields whose recorded inputs differ from the contract or the model files.
 fn stale_fields(fixture: &Fixture, contract: &OnnxContract, model_dir: &Path) -> Vec<String> {
-    let ModelSource::Hf { repo } = &contract.source else {
+    let ModelSource::Hf { repo, .. } = &contract.source else {
         panic!("the preset is an HF model");
     };
     let mut stale = Vec::new();
@@ -110,11 +111,12 @@ fn matching_fixture() -> (Fixture, OnnxContract, tempfile::TempDir) {
             name: name.to_string(),
         });
     }
-    let ModelSource::Hf { repo } = &contract.source else {
+    let ModelSource::Hf { repo, .. } = &contract.source else {
         panic!("the preset is an HF model");
     };
     let fixture = Fixture {
         repo: repo.clone(),
+        revision: String::new(),
         onnx_file: contract.onnx_file.clone(),
         files,
         query_prefix: contract.query_prefix.clone(),
@@ -176,6 +178,36 @@ fn stale_fields_names_a_file_recorded_twice() {
     assert_eq!(
         stale_fields(&fixture, &contract, dir.path()),
         vec![format!("files[{name}]")]
+    );
+}
+
+/// The preset downloads exactly the files the fixture was made from. The revision is also read by
+/// `.github/workflows/model-upstream.yml`.
+#[test]
+fn the_preset_pin_holds_the_fixture_revision_and_file_hashes() {
+    let fixture: Fixture = serde_json::from_str(FIXTURE).unwrap();
+    let ModelSource::Hf { pin: Some(pin), .. } = preset_contract().source else {
+        panic!("the preset is a pinned HF model");
+    };
+    assert_eq!(
+        pin.revision, fixture.revision,
+        "update the preset pin in src/config/model.rs along with the fixture"
+    );
+    let mut pinned: Vec<(String, String)> = pin
+        .files
+        .iter()
+        .map(|(name, hash)| (name.to_string(), hash.to_string()))
+        .collect();
+    let mut recorded: Vec<(String, String)> = fixture
+        .files
+        .iter()
+        .map(|f| (f.name.clone(), f.blake3.clone()))
+        .collect();
+    pinned.sort();
+    recorded.sort();
+    assert_eq!(
+        pinned, recorded,
+        "update the preset pin in src/config/model.rs along with the fixture"
     );
 }
 

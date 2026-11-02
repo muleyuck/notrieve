@@ -1,5 +1,6 @@
 {
  "repo": "sirasagi62/ruri-v3-30m-ONNX",
+ "revision": "cdf9391f1ff2198daa8f63f7ccf97d7b3e7415a0",
  "onnx_file": "onnx/model.onnx",
  "files": [
   {

@@ -1,9 +1,10 @@
 use std::fs::{self, File};
-use std::io;
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
 use super::onnx::required_files;
-use crate::config::{ModelSource, OnnxContract};
+use crate::config::{HfPin, ModelSource, OnnxContract};
+use crate::fingerprint::file_hash;
 use crate::{Error, Result, lock};
 
 const COMPLETE_MARKER: &str = ".complete";
@@ -17,7 +18,7 @@ pub enum DownloadEvent<'a> {
 
 pub fn model_dir(contract: &OnnxContract, cache_root: &Path) -> PathBuf {
     match &contract.source {
-        ModelSource::Hf { repo } => cache_root.join(repo.replace('/', "__")),
+        ModelSource::Hf { repo, .. } => cache_root.join(repo.replace('/', "__")),
         ModelSource::Path { dir } => dir.clone(),
     }
 }
@@ -76,11 +77,19 @@ pub fn with_model_from<T>(
                 });
             }
         }
-        ModelSource::Hf { repo } => {
+        ModelSource::Hf { repo, pin } => {
             fs::create_dir_all(&dir).map_err(|e| Error::io(&dir, e))?;
             // The cache is shared by every vault and process; one downloader at a time.
             let _lock = lock::lock_blocking(&dir.join(".download.lock"))?;
-            refresh_locked(base_url, repo, contract, &dir, force, on_event)?;
+            refresh_locked(
+                base_url,
+                repo,
+                pin.as_ref(),
+                contract,
+                &dir,
+                force,
+                on_event,
+            )?;
             return f(&dir);
         }
     }
@@ -90,6 +99,7 @@ pub fn with_model_from<T>(
 fn refresh_locked(
     base_url: &str,
     repo: &str,
+    pin: Option<&HfPin>,
     contract: &OnnxContract,
     dir: &Path,
     force: bool,
@@ -98,16 +108,26 @@ fn refresh_locked(
     // Renaming several files is not atomic, so a complete set is recorded by a marker
     // that exists only while every file belongs to the same download.
     let marker = dir.join(COMPLETE_MARKER);
-    let refresh = force || !marker.is_file();
+    // The directory is named after the repository only, so an unpinned source or an older
+    // release may have filled it with other files.
+    let refresh = force || !marker.is_file() || pin.is_some_and(|pin| !matches_pin(pin, dir));
     // All-or-nothing: nothing in the cache is replaced until every file has downloaded.
     let mut staged = Staged(Vec::new());
+    let revision = pin.map_or("main", |pin| pin.revision);
     for file in required_files(contract) {
         let target = dir.join(file);
         if refresh || !target.is_file() {
-            let url = format!("{base_url}/{repo}/resolve/main/{file}");
+            let url = format!("{base_url}/{repo}/resolve/{revision}/{file}");
+            let expected = match pin {
+                None => None,
+                Some(pin) => Some(pin.blake3_of(file).ok_or_else(|| Error::Download {
+                    url: url.clone(),
+                    message: "the pinned model lists no blake3 hash for this file".into(),
+                })?),
+            };
             staged
                 .0
-                .push((download(&url, &target, file, on_event)?, target));
+                .push((download(&url, &target, file, expected, on_event)?, target));
         }
     }
     if !staged.0.is_empty() {
@@ -127,6 +147,14 @@ fn refresh_locked(
     Ok(())
 }
 
+/// Whether every file the pin lists is present with its pinned hash. An unreadable file does not
+/// match.
+fn matches_pin(pin: &HfPin, dir: &Path) -> bool {
+    pin.files
+        .iter()
+        .all(|(file, expected)| file_hash(&dir.join(file)).is_ok_and(|hash| hash == *expected))
+}
+
 /// Downloaded `.part` files and their targets. Dropping it removes the parts, so every early
 /// return leaves no partial file behind.
 struct Staged(Vec<(PathBuf, PathBuf)>);
@@ -139,10 +167,12 @@ impl Drop for Staged {
     }
 }
 
+/// `expected` is the blake3 hex the body must hash to.
 fn download(
     url: &str,
     target: &Path,
     file: &str,
+    expected: Option<&str>,
     on_event: &mut dyn FnMut(DownloadEvent<'_>),
 ) -> Result<PathBuf> {
     if let Some(parent) = target.parent() {
@@ -171,7 +201,26 @@ fn download(
         on_event(DownloadEvent::Started { file, total });
         let mut reader = response.into_body().into_reader();
         let mut out = File::create(&part).map_err(|e| Error::io(&part, e))?;
-        io::copy(&mut reader, &mut out).map_err(|e| failed(e.to_string()))?;
+        let mut hasher = blake3::Hasher::new();
+        let mut buf = vec![0u8; 64 * 1024];
+        loop {
+            let n = match reader.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => n,
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(failed(e.to_string())),
+            };
+            hasher.update(&buf[..n]);
+            out.write_all(&buf[..n]).map_err(|e| Error::io(&part, e))?;
+        }
+        if let Some(expected) = expected {
+            let actual = hasher.finalize().to_hex();
+            if actual.as_str() != expected {
+                return Err(failed(format!(
+                    "the file's blake3 hash is {actual}, not the pinned {expected}"
+                )));
+            }
+        }
         out.sync_all().map_err(|e| Error::io(&part, e))
     })();
     match &result {
@@ -186,7 +235,7 @@ fn download(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::Pooling;
+    use crate::config::{HfPin, Pooling};
     use std::fs;
     use std::io::{Read, Write};
     use std::net::TcpListener;
@@ -256,7 +305,11 @@ mod tests {
                 log.lock().unwrap().push(path.clone());
                 let (status, body, declared) = routes
                     .iter()
-                    .find(|(file, ..)| path == format!("/owner/repo/resolve/main/{file}"))
+                    .find(|(file, ..)| {
+                        path.strip_prefix("/owner/repo/resolve/")
+                            .and_then(|rest| rest.split_once('/'))
+                            .is_some_and(|(_, served)| served == *file)
+                    })
                     .map(|(_, s, b, d)| (*s, *b, *d))
                     .unwrap_or((404, b"".as_slice(), 0));
                 let head = format!(
@@ -279,7 +332,107 @@ mod tests {
     fn hf() -> OnnxContract {
         contract(ModelSource::Hf {
             repo: "owner/repo".into(),
+            pin: None,
         })
+    }
+
+    const REVISION: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    /// Pins every file to the hash of `body`, except `wrong`, pinned to another hash.
+    fn pinned(body: &[u8], wrong: Option<&str>) -> OnnxContract {
+        let files: Vec<(&'static str, &'static str)> = FILES
+            .iter()
+            .map(|f| {
+                let content = if Some(*f) == wrong { b"other" } else { body };
+                let hash = blake3::hash(content).to_hex().to_string();
+                (*f, &*Box::leak(hash.into_boxed_str()))
+            })
+            .collect();
+        contract(ModelSource::Hf {
+            repo: "owner/repo".into(),
+            pin: Some(HfPin {
+                revision: REVISION,
+                files: Box::leak(files.into_boxed_slice()),
+            }),
+        })
+    }
+
+    #[test]
+    fn an_unpinned_model_is_fetched_from_main() {
+        let (base, seen) = serve(ok_routes());
+        let cache = TempDir::new().unwrap();
+        ensure_model_from(&base, &hf(), cache.path(), false, &mut |_| {}).unwrap();
+        let seen = seen.lock().unwrap();
+        assert!(
+            seen.iter()
+                .all(|p| p.starts_with("/owner/repo/resolve/main/")),
+            "{seen:?}"
+        );
+    }
+
+    #[test]
+    fn a_pinned_model_is_fetched_from_its_revision_and_checked() {
+        let (base, seen) = serve(ok_routes());
+        let cache = TempDir::new().unwrap();
+        let c = pinned(b"{\"k\":1}", None);
+        let dir = ensure_model_from(&base, &c, cache.path(), false, &mut |_| {}).unwrap();
+        let prefix = format!("/owner/repo/resolve/{REVISION}/");
+        let seen = seen.lock().unwrap();
+        assert!(seen.iter().all(|p| p.starts_with(&prefix)), "{seen:?}");
+        for f in FILES {
+            assert_eq!(fs::read(dir.join(f)).unwrap(), b"{\"k\":1}");
+        }
+    }
+
+    #[test]
+    fn a_complete_cache_that_matches_the_pin_is_used_without_requests() {
+        let (base, seen) = serve(ok_routes());
+        let cache = TempDir::new().unwrap();
+        let c = pinned(b"{\"k\":1}", None);
+        ensure_model_from(&base, &c, cache.path(), false, &mut |_| {}).unwrap();
+        ensure_model_from(&base, &c, cache.path(), false, &mut |_| {}).unwrap();
+        assert_eq!(seen.lock().unwrap().len(), 5);
+    }
+
+    #[test]
+    fn a_complete_cache_that_differs_from_the_pin_is_downloaded_again() {
+        let cache = TempDir::new().unwrap();
+        // An unpinned source or an older release filled the same directory.
+        let (old, _) = serve(routes_with(b"old-content", None));
+        let dir = ensure_model_from(&old, &hf(), cache.path(), false, &mut |_| {}).unwrap();
+        let (new, seen) = serve(routes_with(b"new-content", None));
+        let c = pinned(b"new-content", None);
+        ensure_model_from(&new, &c, cache.path(), false, &mut |_| {}).unwrap();
+        assert_eq!(seen.lock().unwrap().len(), 5);
+        for f in FILES {
+            assert_eq!(fs::read(dir.join(f)).unwrap(), b"new-content", "{f}");
+        }
+    }
+
+    #[test]
+    fn a_file_with_another_hash_is_refused_and_nothing_is_replaced() {
+        let cache = TempDir::new().unwrap();
+        let (old, _) = serve(routes_with(b"old-content", None));
+        let dir = ensure_model_from(
+            &old,
+            &pinned(b"old-content", None),
+            cache.path(),
+            false,
+            &mut |_| {},
+        )
+        .unwrap();
+        let (new, _) = serve(routes_with(b"new-content", None));
+        let c = pinned(b"new-content", Some("config.json"));
+        let err = ensure_model_from(&new, &c, cache.path(), true, &mut |_| {}).unwrap_err();
+        assert!(
+            matches!(&err, Error::Download { url, message }
+                if url.ends_with("/config.json") && message.contains("blake3")),
+            "{err}"
+        );
+        for f in FILES {
+            assert_eq!(fs::read(dir.join(f)).unwrap(), b"old-content", "{f}");
+        }
+        assert!(part_files(&dir).is_empty());
     }
 
     fn part_files(dir: &Path) -> Vec<String> {

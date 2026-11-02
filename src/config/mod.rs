@@ -4,8 +4,8 @@ mod trust;
 mod vault;
 
 pub use model::{
-    ModelContract, ModelSource, ModelSpec, ModelTable, OnnxContract, PRESET_RURI_V3_30M, Pooling,
-    RemoteContract,
+    HfPin, ModelContract, ModelSource, ModelSpec, ModelTable, OnnxContract, PRESET_RURI_V3_30M,
+    Pooling, RemoteContract,
 };
 pub use registry::Registry;
 pub use trust::{RemoteTarget, TrustedSettings};
