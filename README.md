@@ -58,7 +58,8 @@ args = ["mcp", "--vault", "<name>"]
 ```
 
 `<name>` is the vault name `init` printed (`notrieve vault list` shows them all). The agent can
-then search your notes and read the ones it finds.
+then search your notes and read the ones it finds. To use it in one project only, or to turn it
+off, see [The MCP server](docs/usage.md#the-mcp-server).
 
 ## Learn more
 
