@@ -67,9 +67,13 @@ answer that notrieve is still starting until it is ready.
 
 - One server serves one vault. Register one server per vault.
 - Claude Code: `--scope user` makes the notes searchable from every project. Without it, the
-  server is added to the current project only.
+  server is added to the current project only. A session loads only the tool names and the
+  server instructions up front, and the tool definitions when the agent uses them (tool search,
+  on by default). To turn the server off without removing it, toggle it in `/mcp`.
 - Codex: `codex mcp add notrieve -- notrieve mcp --vault <name>` writes the same entry as the
-  `config.toml` in the README.
+  `config.toml` in the README. To use it in one project only, put the entry in that project's
+  `.codex/config.toml` instead (trusted projects only). `enabled = false` turns it off without
+  removing it.
 
 The server offers two tools:
 
