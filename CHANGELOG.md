@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.1.2](https://github.com/muleyuck/notrieve/compare/v0.1.1...v0.1.2) (2026-11-07)
+
+
+### Bug Fixes
+
+* **cache:** refuse another program's database instead of discarding it ([#36](https://github.com/muleyuck/notrieve/issues/36)) ([ed83897](https://github.com/muleyuck/notrieve/commit/ed838971a9024041b9b3ddc61c51005c44208a50))
+* **mcp:** answer the handshake before the model is loaded ([#34](https://github.com/muleyuck/notrieve/issues/34)) ([ca8b77b](https://github.com/muleyuck/notrieve/commit/ca8b77b09f317303c9141c4297c9c6ec832fc2cc))
+* **model:** pin the preset to a Hugging Face revision and check file hashes ([#33](https://github.com/muleyuck/notrieve/issues/33)) ([d009674](https://github.com/muleyuck/notrieve/commit/d009674d64094c5b8acd2f63216506a70bd9c00a))
+* **search:** rank short-term LIKE matches by terms matched and occurrences ([#32](https://github.com/muleyuck/notrieve/issues/32)) ([50b61fc](https://github.com/muleyuck/notrieve/commit/50b61fce63f3b60df05f11419922aaf73ad702dc))
+
 ## [0.1.1](https://github.com/muleyuck/notrieve/compare/v0.1.0...v0.1.1) (2026-11-01)
 
 
