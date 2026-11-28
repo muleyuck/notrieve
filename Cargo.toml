@@ -2,7 +2,7 @@
 name = "notrieve"
 version = "0.1.1"
 edition = "2024"
-rust-version = "1.89"
+rust-version = "1.92"
 license = "MIT"
 description = "Local hybrid search over Markdown notes for AI agents via MCP"
 repository = "https://github.com/muleyuck/notrieve"
